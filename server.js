@@ -75,7 +75,22 @@ function respuestasFijas(texto) {
     };
   }
 
-  return null; // Si no coincide con ninguna palabra clave
+  return null;
+}
+
+// ------------------------------
+//  MENÚ PRINCIPAL
+// ------------------------------
+function menuOpciones() {
+  return {
+    text: "Seleccione una opción:",
+    quick_replies: [
+      { content_type: "text", title: "Presentar denuncia", payload: "DENUNCIA" },
+      { content_type: "text", title: "Oficinas", payload: "OFICINAS" },
+      { content_type: "text", title: "Requisitos", payload: "REQUISITOS" },
+      { content_type: "text", title: "Operador", payload: "OPERADOR" }
+    ]
+  };
 }
 
 // ------------------------------
@@ -85,55 +100,39 @@ app.post('/webhook', async (req, res) => {
   const body = req.body;
 
   if (body.object === 'page') {
-
     for (let entry of body.entry) {
       for (let event of entry.messaging) {
 
         const sender = event.sender.id;
 
         if (event.message && event.message.text) {
-          const texto = event.message.text;
+          const texto = event.message.text.toLowerCase().trim();
           console.log("Mensaje del ciudadano:", texto);
 
-// 🔵 Enviar menú con botones rápidos
-await sendMessage(sender, {
-  text: "Seleccione una opción:",
-  quick_replies: [
-    {
-      content_type: "text",
-      title: "Presentar denuncia",
-      payload: "DENUNCIA"
-    },
-    {
-      content_type: "text",
-      title: "Oficinas",
-      payload: "OFICINAS"
-    },
-    {
-      content_type: "text",
-      title: "Requisitos",
-      payload: "REQUISITOS"
-    },
-    {
-      content_type: "text",
-      title: "Operador",
-      payload: "OPERADOR"
-    }
-  ]
-});
-
-
+          // 🔵 Si el usuario saluda → mostrar menú
+          if (
+            texto === "hola" ||
+            texto.includes("buenas") ||
+            texto.includes("saludos") ||
+            texto.includes("menu")
+          ) {
+            await sendMessage(sender, {
+              text: "¡Hola! ¿En qué puedo asistirle hoy en la Fiscalía de Cajamarca?"
+            });
+            await sendMessage(sender, menuOpciones());
+            continue;
+          }
 
           // 1️⃣ Intentar respuesta fija
           const fija = respuestasFijas(texto);
-
           if (fija) {
             await sendMessage(sender, fija);
-          } else {
-            // 2️⃣ Si no hay respuesta fija, usar IA
-            const respuestaIA = await responderIA(texto);
-            await sendMessage(sender, { text: respuestaIA });
+            continue;
           }
+
+          // 2️⃣ Si no hay respuesta fija, usar IA
+          const respuestaIA = await responderIA(texto);
+          await sendMessage(sender, { text: respuestaIA });
         }
       }
     }

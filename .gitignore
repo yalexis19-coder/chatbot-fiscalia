@@ -1,0 +1,30 @@
+# Node modules
+node_modules/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables
+.env
+.env.local
+.env.production
+.env.development
+
+# Build outputs
+dist/
+build/
+
+# Render temporary files
+.render/
+.tmp/
+
+# MacOS files
+.DS_Store
+
+# VSCode
+.vscode/
+
+# Coverage / testing
+coverage/

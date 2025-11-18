@@ -95,6 +95,35 @@ app.post('/webhook', async (req, res) => {
           const texto = event.message.text;
           console.log("Mensaje del ciudadano:", texto);
 
+// 🔵 Enviar menú con botones rápidos
+await sendMessage(sender, {
+  text: "Seleccione una opción:",
+  quick_replies: [
+    {
+      content_type: "text",
+      title: "Presentar denuncia",
+      payload: "DENUNCIA"
+    },
+    {
+      content_type: "text",
+      title: "Oficinas",
+      payload: "OFICINAS"
+    },
+    {
+      content_type: "text",
+      title: "Requisitos",
+      payload: "REQUISITOS"
+    },
+    {
+      content_type: "text",
+      title: "Operador",
+      payload: "OPERADOR"
+    }
+  ]
+});
+
+
+
           // 1️⃣ Intentar respuesta fija
           const fija = respuestasFijas(texto);
 

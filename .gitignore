@@ -28,3 +28,5 @@ build/
 
 # Coverage / testing
 coverage/
+
+*.xlsx

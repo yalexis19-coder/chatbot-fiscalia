@@ -1,6 +1,6 @@
 // server.js
 // Backend del chatbot institucional del Ministerio Público – Fiscalía de Cajamarca
-// para integrar con Facebook Messenger.
+// Integración con Facebook Messenger
 
 require('dotenv').config();
 const express = require('express');
@@ -10,45 +10,28 @@ const { responderIA } = require('./ia');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Tokens de entorno
-const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN; // Token de la página de Facebook
+const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'mp_cajamarca_verify_token';
 
-if (!PAGE_ACCESS_TOKEN) {
-  console.warn('⚠️  PAGE_ACCESS_TOKEN no está definido en las variables de entorno.');
-}
-if (!process.env.OPENAI_API_KEY) {
-  console.warn('⚠️  OPENAI_API_KEY no está definido en las variables de entorno.');
-}
-
-// Para parsear JSON del webhook
 app.use(express.json());
 
-// Almacén simple de sesiones en memoria (por PSID de Messenger)
+// ---------------------------
+// Sesiones en memoria
+// ---------------------------
 const sessions = {};
-
-// ---------------------------
-// Utilidades
-// ---------------------------
 
 function getSession(userId) {
   if (!sessions[userId]) {
-    sessions[userId] = {
-      estado: 'INICIO',
-      contexto: null
-    };
+    sessions[userId] = { estado: 'INICIO', contexto: null };
   }
   return sessions[userId];
 }
 
-/**
- * Envía un mensaje de texto a un usuario de Messenger
- */
-async function enviarMensajeMessenger(recipientId, text) {
-  if (!PAGE_ACCESS_TOKEN) {
-    console.error('❌ PAGE_ACCESS_TOKEN no configurado, no se puede enviar el mensaje.');
-    return;
-  }
+// ---------------------------
+// Enviar mensaje a Messenger (con quick replies opcionales)
+// ---------------------------
+async function enviarMensajeMessenger(recipientId, text, quickReplies = null) {
+  if (!PAGE_ACCESS_TOKEN) return;
 
   const url = `https://graph.facebook.com/v18.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
 
@@ -57,129 +40,121 @@ async function enviarMensajeMessenger(recipientId, text) {
     message: { text }
   };
 
-  try {
-    await axios.post(url, payload);
-    console.log(`✅ Mensaje enviado a ${recipientId}: ${text}`);
-  } catch (err) {
-    console.error('❌ Error al enviar mensaje a Messenger:', err?.response?.data || err.message);
+  if (Array.isArray(quickReplies) && quickReplies.length) {
+    payload.message.quick_replies = quickReplies;
   }
+
+  await axios.post(url, payload);
 }
 
 // ---------------------------
-// Endpoint de salud
+// Salud
 // ---------------------------
-
 app.get('/', (req, res) => {
   res.send('Chatbot Fiscalía de Cajamarca – OK');
 });
 
 // ---------------------------
-// Verificación del Webhook (GET)
+// Verificación Webhook
 // ---------------------------
-
 app.get('/webhook', (req, res) => {
-  // Parámetros enviados por Meta al configurar el webhook
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  // Verificar si el modo y token son correctos
-  if (mode && token) {
-    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-      console.log('✅ Webhook verificado correctamente.');
-      res.status(200).send(challenge);
-    } else {
-      console.warn('⚠️ Intento de verificación con token incorrecto.');
-      res.sendStatus(403);
-    }
-  } else {
-    res.sendStatus(400);
+  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    return res.status(200).send(challenge);
   }
+  return res.sendStatus(403);
 });
 
 // ---------------------------
-// Recepción de mensajes (POST)
+// Recepción de mensajes
 // ---------------------------
-
 app.post('/webhook', async (req, res) => {
   const body = req.body;
 
-  // Verificar que el evento proviene de una página
-  if (body.object === 'page') {
-    // Iterar sobre las entradas (por si llegan varias)
-    for (const entry of body.entry || []) {
-      const webhookEvent = entry.messaging && entry.messaging[0];
-      if (!webhookEvent) continue;
+  if (body.object !== 'page') return res.sendStatus(404);
 
-      const senderId = webhookEvent.sender && webhookEvent.sender.id;
-      if (!senderId) continue;
+  for (const entry of body.entry || []) {
+    const event = entry.messaging && entry.messaging[0];
+    if (!event) continue;
 
-      console.log('📩 Evento recibido:', JSON.stringify(webhookEvent, null, 2));
+    const senderId = event.sender?.id;
+    if (!senderId) continue;
 
-      // Ignorar mensajes de eco (enviados por la propia página)
-      if (webhookEvent.message && webhookEvent.message.is_echo) {
+    // Ignorar eco
+    if (event.message?.is_echo) continue;
+
+    const session = getSession(senderId);
+
+    // ---------------------------
+    // Quick Replies
+    // ---------------------------
+    const qrPayload = event.message?.quick_reply?.payload;
+    if (qrPayload) {
+      if (qrPayload === 'MENU_DENUNCIA') {
+        session.estado = 'ESPERANDO_RELATO';
+        session.contexto = null;
+
+        await enviarMensajeMessenger(
+          senderId,
+          'Por favor, cuénteme brevemente qué ocurrió.'
+        );
         continue;
       }
 
-      // Manejo de mensajes de texto
-      if (webhookEvent.message && webhookEvent.message.text) {
-        const texto = webhookEvent.message.text;
+      await enviarMensajeMessenger(
+        senderId,
+        'Puede escribir su consulta o elegir una opción.'
+      );
+      continue;
+    }
 
-        // Recuperar o crear sesión
-        const session = getSession(senderId);
+    // ---------------------------
+    // Texto libre
+    // ---------------------------
+    if (event.message?.text) {
+      try {
+        const { respuestaTexto, session: nuevaSession } =
+          await responderIA(session, event.message.text);
 
-        try {
-          const { respuestaTexto, session: nuevaSession } = await responderIA(session, texto);
-          sessions[senderId] = nuevaSession; // guardar cambios en la sesión
-
-          await enviarMensajeMessenger(senderId, respuestaTexto);
-        } catch (err) {
-          console.error('❌ Error en responderIA:', err);
-          await enviarMensajeMessenger(
-            senderId,
-            'Ha ocurrido un inconveniente al procesar su mensaje. Por favor, inténtelo nuevamente en unos momentos.'
-          );
-        }
-      }
-
-      // Manejo de postbacks (ej. botón "Empezar")
-      if (webhookEvent.postback && webhookEvent.postback.payload) {
-        const payload = webhookEvent.postback.payload;
-        const session = getSession(senderId);
-
-        if (payload === 'GET_STARTED') {
-          // Reiniciar sesión y enviar mensaje de bienvenida
-          session.estado = 'INICIO';
-          session.contexto = null;
-
-          const bienvenida =
-            'Paz y bien. Soy el asistente virtual del Ministerio Público – Fiscalía de Cajamarca. ' +
-            'Puedo orientarle sobre dónde presentar una denuncia, dudas frecuentes, trámites y datos de contacto de las fiscalías.\n\n' +
-            'Por favor, cuénteme brevemente qué ha ocurrido o en qué necesita orientación.';
-
-          await enviarMensajeMessenger(senderId, bienvenida);
-        } else {
-          // Otros posibles payloads futuros
-          await enviarMensajeMessenger(
-            senderId,
-            'Gracias por comunicarse con el Ministerio Público – Fiscalía de Cajamarca. Por favor, cuénteme brevemente su consulta o denuncia para poder orientarle.'
-          );
-        }
+        sessions[senderId] = nuevaSession;
+        await enviarMensajeMessenger(senderId, respuestaTexto);
+      } catch (e) {
+        await enviarMensajeMessenger(
+          senderId,
+          'Ocurrió un inconveniente al procesar su mensaje. Intente nuevamente.'
+        );
       }
     }
 
-    // Responder 200 OK siempre que el evento venga de "page"
-    res.sendStatus(200);
-  } else {
-    // No es de tipo page
-    res.sendStatus(404);
+    // ---------------------------
+    // GET_STARTED
+    // ---------------------------
+    if (event.postback?.payload === 'GET_STARTED') {
+      session.estado = 'INICIO';
+      session.contexto = null;
+
+      const bienvenida =
+        'Paz y bien. Soy el asistente virtual del Ministerio Público – Fiscalía de Cajamarca.\n\n' +
+        'Puedo orientarle sobre dónde presentar una denuncia, trámites, preguntas frecuentes y datos de contacto.';
+
+      const menu = [
+        { content_type: 'text', title: '📝 Denuncia', payload: 'MENU_DENUNCIA' },
+        { content_type: 'text', title: '📍 Ubicación de fiscalía', payload: 'MENU_UBICACION' },
+        { content_type: 'text', title: '❓ Preguntas frecuentes', payload: 'MENU_FAQ' },
+        { content_type: 'text', title: '📄 Trámites', payload: 'MENU_TRAMITES' },
+        { content_type: 'text', title: '☎️ Contactos', payload: 'MENU_CONTACTOS' }
+      ];
+
+      await enviarMensajeMessenger(senderId, bienvenida, menu);
+    }
   }
+
+  res.sendStatus(200);
 });
 
-// ---------------------------
-// Iniciar servidor
-// ---------------------------
-
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor del chatbot escuchando en el puerto ${PORT}`);
+  console.log(`🚀 Servidor escuchando en puerto ${PORT}`);
 });

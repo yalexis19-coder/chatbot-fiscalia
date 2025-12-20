@@ -1,6 +1,14 @@
 /**
- * ChatbotFiscalia - server.js (v2)
- * Menu completo + control de estado + anti-bucle
+ * ChatbotFiscalia - server.js (FIX)
+ * - Menú completo (Quick Replies)
+ * - Manejo correcto de Quick Replies (message.quick_reply.payload)
+ * - Flujo de Denuncia sin volver al saludo
+ * - Anti-bucle básico para preguntas repetidas
+ *
+ * Requisitos (env):
+ *  - PAGE_ACCESS_TOKEN
+ *  - VERIFY_TOKEN
+ *  - PORT (opcional)
  */
 
 const express = require("express");
@@ -20,7 +28,7 @@ const sessions = new Map();
 function getSession(psid) {
   if (!sessions.has(psid)) {
     sessions.set(psid, {
-      stage: "idle",
+      stage: "idle",        // idle | denuncia | await_distrito | ubicacion | faq | tramites | contactos
       distrito: null,
       materia: null,
       lastQuestion: null,
@@ -39,10 +47,10 @@ function setAsked(session, key) {
   session.lastAt = Date.now();
 }
 
-// ---------------- MENÚ ----------------
+// ---------------- MENSAJERÍA ----------------
 async function send(psid, message) {
   const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
-  await fetch(url, {
+  const resp = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -51,6 +59,12 @@ async function send(psid, message) {
       message
     })
   });
+
+  // Log mínimo si hay error
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => "");
+    console.error("Send API error:", resp.status, txt);
+  }
 }
 
 async function menu(psid) {
@@ -79,19 +93,37 @@ app.get("/webhook", (req, res) => {
 
 app.post("/webhook", async (req, res) => {
   const entries = req.body.entry || [];
+
   for (const entry of entries) {
     const events = entry.messaging || [];
+
     for (const event of events) {
       const psid = event.sender?.id;
       if (!psid) continue;
 
-      if (event.postback) {
+      // 1) Postbacks (botón GET_STARTED / templates)
+      if (event.postback?.payload) {
         await handlePostback(psid, event.postback.payload);
-      } else if (event.message && event.message.text) {
-        await handleMessage(psid, event.message.text);
+        continue;
+      }
+
+      // 2) Mensajes
+      if (event.message) {
+        // ✅ FIX: Quick Replies llegan aquí, NO como postback
+        const qrPayload = event.message.quick_reply?.payload;
+        if (qrPayload) {
+          await handlePostback(psid, qrPayload);
+          continue;
+        }
+
+        const text = event.message.text;
+        if (text) {
+          await handleMessage(psid, text.trim());
+        }
       }
     }
   }
+
   res.sendStatus(200);
 });
 
@@ -101,77 +133,131 @@ async function handlePostback(psid, payload) {
 
   if (payload === "GET_STARTED") {
     session.stage = "idle";
+    session.distrito = null;
+    session.materia = null;
     return menu(psid);
   }
 
   if (payload === "DENUNCIA") {
     session.stage = "denuncia";
+    // No limpiamos distrito si ya se obtuvo, pero sí puedes hacerlo si tu UX lo requiere.
     setAsked(session, "relato");
-    return send(psid, { text: "Cuéntame, ¿qué ocurrió?" });
+    await send(psid, { text: "Perfecto. Cuéntame, por favor, ¿qué ocurrió? Puedes describir los hechos con tus palabras." });
+    return;
   }
 
   if (payload === "UBICACION") {
     session.stage = "ubicacion";
-    setAsked(session, "distrito");
-    return send(psid, { text: "Indícame el distrito o provincia para darte la ubicación." });
+    setAsked(session, "ubicacion");
+    await send(psid, { text: "Indícame el distrito o provincia y te digo la sede/fiscalía más cercana." });
+    return;
   }
 
   if (payload === "FAQ") {
     session.stage = "faq";
-    return send(psid, { text: "Escribe tu pregunta y te responderé." });
+    await send(psid, { text: "Escribe tu pregunta y te responderé con la información disponible." });
+    return;
   }
 
   if (payload === "TRAMITES") {
     session.stage = "tramites";
-    return send(psid, { text: "¿Qué trámite deseas realizar?" });
+    await send(psid, { text: "¿Qué trámite necesitas? (Ej.: denunciar, copias, orientación, etc.)" });
+    return;
   }
 
   if (payload === "CONTACTOS") {
     session.stage = "contactos";
-    return send(psid, { text: "¿De qué sede o entidad necesitas el contacto?" });
+    await send(psid, { text: "¿Qué entidad o sede deseas contactar? Indica distrito/provincia si aplica." });
+    return;
   }
 
+  // Si llega algo desconocido, mostramos menú
+  session.stage = "idle";
   return menu(psid);
 }
 
 async function handleMessage(psid, text) {
   const session = getSession(psid);
 
+  // Si el usuario escribe algo como "menu", le mostramos el menú
+  const tnorm = (text || "").toLowerCase();
+  if (tnorm === "menu" || tnorm === "menú" || tnorm === "inicio") {
+    session.stage = "idle";
+    return menu(psid);
+  }
+
+  // --------------- DENUNCIA ---------------
   if (session.stage === "denuncia") {
     const analysis = await analyzeMessage({
       userText: text,
       sessionContext: session
     });
 
-    session.materia = analysis.materia;
+    session.materia = analysis?.materia || session.materia || "penal";
 
-    if (analysis.requiere_distrito && !session.distrito) {
+    if (analysis?.requiere_distrito && !session.distrito) {
       session.stage = "await_distrito";
       if (!askedRecently(session, "distrito")) {
         setAsked(session, "distrito");
-        return send(psid, { text: "¿En qué distrito ocurrieron los hechos?" });
+        await send(psid, { text: "¿En qué distrito ocurrieron los hechos? (Ej.: Cajamarca, Baños del Inca, San Marcos)" });
       }
       return;
     }
 
-    return send(psid, {
-      text: `Gracias. Según lo descrito, se trata de un caso de *${analysis.materia}*. Acércate a la fiscalía correspondiente para orientación.`
+    await send(psid, {
+      text:
+        `Gracias. Por lo descrito, se trataría de un caso de **${session.materia}**. ` +
+        `Para recibir orientación y presentar tu denuncia, acércate a la fiscalía competente de tu zona.`
     });
+    // Opcional: mostrar menú después de orientar
+    session.stage = "idle";
+    return menu(psid);
   }
 
   if (session.stage === "await_distrito") {
     session.distrito = text;
     session.stage = "denuncia";
-    return send(psid, {
-      text: `Gracias. Con lo ocurrido en *${session.distrito}*, corresponde orientación en fiscalía de *${session.materia || "la materia correspondiente"}*.`
-    });
+    await send(psid, { text: `Gracias. Registré el distrito: **${session.distrito}**.` });
+
+    // Continuamos pidiendo relato (si no lo tenemos claro)
+    if (!askedRecently(session, "relato")) {
+      setAsked(session, "relato");
+      await send(psid, { text: "Ahora, por favor, cuéntame brevemente qué ocurrió." });
+    }
+    return;
   }
 
-  // Otros flujos simples
+  // --------------- OTROS FLUJOS (básico) ---------------
+  if (session.stage === "ubicacion") {
+    await send(psid, { text: `Gracias. Estoy tomando nota de: **${text}**. (Aquí conectaremos la búsqueda de ubicación desde tu Excel/knowledge).` });
+    session.stage = "idle";
+    return menu(psid);
+  }
+
+  if (session.stage === "faq") {
+    await send(psid, { text: `Recibí tu pregunta: **${text}**. (Aquí conectaremos la respuesta desde tu hoja FAQ/knowledge).` });
+    session.stage = "idle";
+    return menu(psid);
+  }
+
+  if (session.stage === "tramites") {
+    await send(psid, { text: `Trámite consultado: **${text}**. (Aquí conectaremos pasos/requisitos desde tu hoja Procedimiento).` });
+    session.stage = "idle";
+    return menu(psid);
+  }
+
+  if (session.stage === "contactos") {
+    await send(psid, { text: `Contacto solicitado: **${text}**. (Aquí conectaremos datos desde tu hoja Contacto).` });
+    session.stage = "idle";
+    return menu(psid);
+  }
+
+  // --------------- IDLE ---------------
+  // Si está idle, mostramos menú directamente
+  session.stage = "idle";
   return menu(psid);
 }
 
 // ---------------- START ----------------
-app.listen(PORT, () => {
-  console.log("Servidor activo en puerto", PORT);
-});
+app.get("/", (req, res) => res.status(200).send("ChatbotFiscalia OK"));
+app.listen(PORT, () => console.log("Servidor activo en puerto", PORT));

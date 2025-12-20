@@ -1,9 +1,9 @@
 /**
- * ChatbotFiscalia - server.js (FIX)
- * - Menú completo (Quick Replies)
- * - Manejo correcto de Quick Replies (message.quick_reply.payload)
- * - Flujo de Denuncia sin volver al saludo
- * - Anti-bucle básico para preguntas repetidas
+ * ChatbotFiscalia - server.js (v3)
+ * Cambios puntuales (sin romper lo que ya funciona):
+ * 1) ✅ Manejo correcto de Quick Replies: event.message.quick_reply.payload
+ * 2) ✅ Si el ciudadano YA menciona el distrito en su relato (ej. "en Contumaza"), lo capturamos y NO lo volvemos a pedir
+ * 3) ✅ Si falta distrito y lo pedimos, guardamos el relato (pendingStory) para NO pedirlo de nuevo después
  *
  * Requisitos (env):
  *  - PAGE_ACCESS_TOKEN
@@ -31,6 +31,7 @@ function getSession(psid) {
       stage: "idle",        // idle | denuncia | await_distrito | ubicacion | faq | tramites | contactos
       distrito: null,
       materia: null,
+      pendingStory: null,   // ✅ relato guardado cuando falta distrito
       lastQuestion: null,
       lastAt: 0
     });
@@ -47,6 +48,34 @@ function setAsked(session, key) {
   session.lastAt = Date.now();
 }
 
+// ---------------- EXTRACCIÓN SIMPLE DE DISTRITO DESDE RELATO ----------------
+// Nota: Esto es una heurística "segura" para tu caso ("en Contumaza").
+// Ideal (futuro): validar contra lista real de distritos desde tu Excel/knowledge.
+function extractDistritoFromStory(text) {
+  const t = (text || "").trim();
+  if (!t) return null;
+
+  // Captura "en Contumaza", "en Baños del Inca", etc.
+  // Evita capturar frases muy largas.
+  const m = t.match(/\ben\s+([A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s]{3,40})/i);
+  if (!m) return null;
+
+  let cand = (m[1] || "").trim();
+
+  // Cortar si luego viene "provincia", "distrito", "departamento" u otra palabra común
+  cand = cand.split(/\b(provincia|distrito|departamento|regi[oó]n)\b/i)[0].trim();
+
+  // Limpiar puntuación final
+  cand = cand.replace(/[.,;:]+$/, "").trim();
+
+  // Filtro mínimo para evitar capturar cosas tipo "mi casa"
+  const low = cand.toLowerCase();
+  const blacklist = ["mi casa", "casa", "mi hogar", "el mercado", "mercado", "la calle", "la plaza"];
+  if (blacklist.includes(low)) return null;
+
+  return cand || null;
+}
+
 // ---------------- MENSAJERÍA ----------------
 async function send(psid, message) {
   const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
@@ -60,7 +89,6 @@ async function send(psid, message) {
     })
   });
 
-  // Log mínimo si hay error
   if (!resp.ok) {
     const txt = await resp.text().catch(() => "");
     console.error("Send API error:", resp.status, txt);
@@ -101,7 +129,7 @@ app.post("/webhook", async (req, res) => {
       const psid = event.sender?.id;
       if (!psid) continue;
 
-      // 1) Postbacks (botón GET_STARTED / templates)
+      // 1) Postbacks (GET_STARTED / templates)
       if (event.postback?.payload) {
         await handlePostback(psid, event.postback.payload);
         continue;
@@ -109,7 +137,7 @@ app.post("/webhook", async (req, res) => {
 
       // 2) Mensajes
       if (event.message) {
-        // ✅ FIX: Quick Replies llegan aquí, NO como postback
+        // ✅ FIX: Quick Replies llegan aquí
         const qrPayload = event.message.quick_reply?.payload;
         if (qrPayload) {
           await handlePostback(psid, qrPayload);
@@ -135,12 +163,12 @@ async function handlePostback(psid, payload) {
     session.stage = "idle";
     session.distrito = null;
     session.materia = null;
+    session.pendingStory = null;
     return menu(psid);
   }
 
   if (payload === "DENUNCIA") {
     session.stage = "denuncia";
-    // No limpiamos distrito si ya se obtuvo, pero sí puedes hacerlo si tu UX lo requiere.
     setAsked(session, "relato");
     await send(psid, { text: "Perfecto. Cuéntame, por favor, ¿qué ocurrió? Puedes describir los hechos con tus palabras." });
     return;
@@ -171,7 +199,6 @@ async function handlePostback(psid, payload) {
     return;
   }
 
-  // Si llega algo desconocido, mostramos menú
   session.stage = "idle";
   return menu(psid);
 }
@@ -179,7 +206,7 @@ async function handlePostback(psid, payload) {
 async function handleMessage(psid, text) {
   const session = getSession(psid);
 
-  // Si el usuario escribe algo como "menu", le mostramos el menú
+  // Atajo al menú
   const tnorm = (text || "").toLowerCase();
   if (tnorm === "menu" || tnorm === "menú" || tnorm === "inicio") {
     session.stage = "idle";
@@ -188,6 +215,12 @@ async function handleMessage(psid, text) {
 
   // --------------- DENUNCIA ---------------
   if (session.stage === "denuncia") {
+    // ✅ NUEVO: si en el relato ya viene el distrito, lo guardamos y NO lo pedimos
+    if (!session.distrito) {
+      const d = extractDistritoFromStory(text);
+      if (d) session.distrito = d;
+    }
+
     const analysis = await analyzeMessage({
       userText: text,
       sessionContext: session
@@ -195,8 +228,11 @@ async function handleMessage(psid, text) {
 
     session.materia = analysis?.materia || session.materia || "penal";
 
+    // Si requiere distrito y aún no lo tenemos, lo pedimos y guardamos el relato
     if (analysis?.requiere_distrito && !session.distrito) {
+      session.pendingStory = text; // ✅ guardar relato para continuar luego
       session.stage = "await_distrito";
+
       if (!askedRecently(session, "distrito")) {
         setAsked(session, "distrito");
         await send(psid, { text: "¿En qué distrito ocurrieron los hechos? (Ej.: Cajamarca, Baños del Inca, San Marcos)" });
@@ -204,30 +240,55 @@ async function handleMessage(psid, text) {
       return;
     }
 
+    // ✅ Respuesta (ya con distrito si estaba en relato o ya estaba en sesión)
+    const d = session.distrito ? ` en **${session.distrito}**` : "";
     await send(psid, {
       text:
-        `Gracias. Por lo descrito, se trataría de un caso de **${session.materia}**. ` +
+        `Gracias. Por lo descrito, se trataría de un caso de **${session.materia}**${d}. ` +
         `Para recibir orientación y presentar tu denuncia, acércate a la fiscalía competente de tu zona.`
     });
-    // Opcional: mostrar menú después de orientar
+
+    // Opcional: volver a menú
     session.stage = "idle";
     return menu(psid);
   }
 
+  // --------------- ESPERANDO DISTRITO ---------------
   if (session.stage === "await_distrito") {
     session.distrito = text;
-    session.stage = "denuncia";
-    await send(psid, { text: `Gracias. Registré el distrito: **${session.distrito}**.` });
 
-    // Continuamos pidiendo relato (si no lo tenemos claro)
+    // ✅ Si tenemos relato guardado, continuamos sin pedirlo otra vez
+    const story = session.pendingStory;
+    session.pendingStory = null;
+
+    if (story) {
+      const analysis = await analyzeMessage({
+        userText: story,
+        sessionContext: session
+      });
+
+      session.materia = analysis?.materia || session.materia || "penal";
+
+      await send(psid, {
+        text:
+          `Gracias. Para hechos ocurridos en **${session.distrito}**, por lo descrito se trataría de un caso de **${session.materia}**. ` +
+          `Acércate a la fiscalía competente de tu zona para orientación y recepción de la denuncia.`
+      });
+
+      session.stage = "idle";
+      return menu(psid);
+    }
+
+    // Si por alguna razón no hay relato guardado, pedimos el relato (fallback)
+    session.stage = "denuncia";
     if (!askedRecently(session, "relato")) {
       setAsked(session, "relato");
-      await send(psid, { text: "Ahora, por favor, cuéntame brevemente qué ocurrió." });
+      await send(psid, { text: "Gracias. Ahora, por favor, cuéntame brevemente qué ocurrió." });
     }
     return;
   }
 
-  // --------------- OTROS FLUJOS (básico) ---------------
+  // --------------- OTROS FLUJOS (básico, sin romper lo actual) ---------------
   if (session.stage === "ubicacion") {
     await send(psid, { text: `Gracias. Estoy tomando nota de: **${text}**. (Aquí conectaremos la búsqueda de ubicación desde tu Excel/knowledge).` });
     session.stage = "idle";
@@ -253,7 +314,6 @@ async function handleMessage(psid, text) {
   }
 
   // --------------- IDLE ---------------
-  // Si está idle, mostramos menú directamente
   session.stage = "idle";
   return menu(psid);
 }

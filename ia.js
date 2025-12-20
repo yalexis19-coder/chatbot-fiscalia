@@ -24,19 +24,52 @@ function esRespuestaSiNo(texto) {
   return null;
 }
 
-function pareceCasoFamilia(texto) {
+function esSaludo(texto) {
+  const t = normalize(texto);
   return [
+    'hola',
+    'buenas',
+    'buenos dias',
+    'buenas tardes',
+    'buenas noches',
+    'inicio',
+    'empezar',
+    'menu',
+    'menú'
+  ].includes(t);
+}
+
+function esComandoReinicio(texto) {
+  const t = normalize(texto);
+  return ['fin', 'cancelar', 'reiniciar', 'salir', 'nuevo', 'empezar de nuevo'].includes(t);
+}
+
+// Heurística: temas de familia tratados como CASO (no consulta informativa)
+function pareceCasoFamilia(texto) {
+  const t = normalize(texto);
+  const claves = [
     'no me deja ver',
     'me impide ver',
+    'no me permite ver',
     'regimen de visitas',
+    'régimen de visitas',
+    'visitas',
     'tenencia',
     'custodia',
     'alimentos',
     'pension',
+    'pensión',
+    'demanda de alimentos',
+    'filiacion',
+    'filiación',
+    'reconocimiento',
     'hijo',
     'hija',
-    'menor'
-  ].some(k => normalize(texto).includes(k));
+    'menor',
+    'mi bebe',
+    'mi bebé'
+  ];
+  return claves.some((k) => t.includes(normalize(k)));
 }
 
 // ---------------------------
@@ -68,6 +101,7 @@ Devuelve SOLO este JSON:
 // Flujo principal
 // ---------------------------
 async function responderIA(session, texto) {
+  // Asegurar contexto base
   if (!session.contexto) {
     session.contexto = {
       distritoTexto: null,
@@ -78,31 +112,67 @@ async function responderIA(session, texto) {
   }
 
   // ---------------------------
+  // Reinicio por saludo o comando
+  // ---------------------------
+  if (esSaludo(texto) || esComandoReinicio(texto)) {
+    session.estado = 'INICIO';
+    session.contexto = {
+      distritoTexto: null,
+      delitoEspecifico: null,
+      materiaDetectada: null,
+      vinculoRespuesta: null
+    };
+
+    return {
+      respuestaTexto:
+        'Hola, soy el asistente virtual del Ministerio Público – Fiscalía de Cajamarca.\n\n' +
+        'Puedo orientarte para presentar una denuncia o brindarte información.\n' +
+        'Cuéntame brevemente qué ocurrió o qué necesitas.',
+      session
+    };
+  }
+
+  // ---------------------------
   // Inicio / Relato
   // ---------------------------
   if (session.estado === 'INICIO' || session.estado === 'ESPERANDO_RELATO') {
+    // Casos de familia → se tratan como relato
     if (pareceCasoFamilia(texto)) {
       session.contexto.materiaDetectada = 'Familia';
+      session.contexto.delitoEspecifico = null;
+      session.contexto.distritoTexto = null;
       session.estado = 'ESPERANDO_DISTRITO';
 
       return {
         respuestaTexto:
-          'Entiendo. Para orientarle correctamente, indíqueme en qué distrito ocurrieron los hechos.',
+          'Entiendo la situación.\n\n' +
+          'Para orientarte correctamente, indícame en qué **distrito** ocurrieron los hechos ' +
+          '(por ejemplo: Cajamarca, Baños del Inca, La Encañada).',
         session
       };
     }
 
+    // Clasificación IA
     const clasif = await clasificarMensaje(texto);
 
     session.contexto.delitoEspecifico = clasif.delito_especifico;
     session.contexto.materiaDetectada = clasif.materia;
-    session.contexto.distritoTexto = clasif.distrito;
+    session.contexto.distritoTexto = clasif.distrito || null;
+
+    if (!session.contexto.materiaDetectada && !session.contexto.delitoEspecifico) {
+      session.estado = 'ESPERANDO_RELATO';
+      return {
+        respuestaTexto:
+          'Para ayudarte mejor, ¿podrías contarme un poco más sobre lo ocurrido?',
+        session
+      };
+    }
 
     session.estado = 'DERIVACION';
   }
 
   // ---------------------------
-  // Derivación
+  // Derivación / Distrito
   // ---------------------------
   if (session.estado === 'DERIVACION' || session.estado === 'ESPERANDO_DISTRITO') {
     if (!session.contexto.distritoTexto) {
@@ -126,9 +196,19 @@ async function responderIA(session, texto) {
       return { respuestaTexto: res.mensaje, session };
     }
 
+    // Fallback seguro
+    session.estado = 'ESPERANDO_RELATO';
+    session.contexto = {
+      distritoTexto: null,
+      delitoEspecifico: null,
+      materiaDetectada: null,
+      vinculoRespuesta: null
+    };
+
     return {
       respuestaTexto:
-        'No pude determinar la fiscalía competente. ¿Podría describir nuevamente el caso?',
+        'No pude determinar la fiscalía competente con la información brindada.\n\n' +
+        'Si deseas, puedes describir nuevamente el caso o escribir "menu" para empezar de nuevo.',
       session
     };
   }
@@ -140,7 +220,7 @@ async function responderIA(session, texto) {
     const resp = esRespuestaSiNo(texto);
     if (!resp) {
       return {
-        respuestaTexto: 'Por favor responda solo "sí" o "no".',
+        respuestaTexto: 'Por favor responde solo **"sí"** o **"no"**.',
         session
       };
     }
@@ -148,7 +228,7 @@ async function responderIA(session, texto) {
     session.contexto.vinculoRespuesta = resp;
     session.estado = 'DERIVACION';
 
-    return responderIA(session, texto);
+    return responderIA(session, session.contexto.distritoTexto || texto);
   }
 
   // ---------------------------
@@ -156,7 +236,7 @@ async function responderIA(session, texto) {
   // ---------------------------
   return {
     respuestaTexto:
-      'Puede contarme su caso o elegir la opción 📝 Denuncia para iniciar.',
+      'Puedes contarme tu caso para orientarte, o escribir "menu" para iniciar nuevamente.',
     session
   };
 }

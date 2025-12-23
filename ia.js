@@ -5,9 +5,6 @@
 // - Clasificar el mensaje del ciudadano (materia / delito específico / distrito)
 // - Gestionar el estado conversacional mínimo para la FUNCIÓN 1 (derivación a fiscalía)
 // - Delegar la lógica normativa de competencia a derivacion.js (resolverFiscalia)
-//
-// Requiere:
-// - derivacion.js (exporta resolverFiscalia)
 
 const OpenAI = require('openai');
 const { resolverFiscalia } = require('./derivacion');
@@ -75,33 +72,55 @@ function extraerDistritoDesdeTexto(texto) {
   const t = normalize(texto);
 
   // Buscar " en <algo>" o " en la/el/los/las <algo>"
-  // Capturamos hasta 40 caracteres o hasta un separador
   const m = t.match(/\ben\s+(la|el|los|las)?\s*([a-z0-9ñ\s\-\(\)]+?)(?=$|[.,;:!?\n])/i);
   if (!m) return null;
 
   let candidato = (m[2] || '').trim();
   if (!candidato) return null;
 
-  // Limpiar espacios dobles
   candidato = candidato.replace(/\s+/g, ' ').trim();
 
-  // Si viene muy largo, probablemente no es un distrito (evitar "en la encañada y luego...")
+  // demasiado largo = probablemente no es distrito
   if (candidato.length > 40) return null;
 
-  // Evitar cosas demasiado genéricas
+  // descartes comunes
   const descartes = new Set(['mi casa', 'casa', 'la calle', 'mi barrio', 'el barrio', 'la ciudad']);
   if (descartes.has(candidato)) return null;
 
-  // Reponer mayúsculas tipo título solo para guardar más bonito (resolverFiscalia normaliza igual)
-  // "la encanada" -> "la encanada" (no hace falta perfecto)
   return candidato;
+}
+
+function textoSugiereDenunciaPenal(texto) {
+  const t = normalize(texto);
+  // Palabras típicas de denuncias penales (no exhaustivo)
+  const claves = [
+    'robo',
+    'me robaron',
+    'asalto',
+    'me asaltaron',
+    'hurto',
+    'me hurtaron',
+    'me quitaron',
+    'me arrebataron',
+    'me amenazaron',
+    'me golpearon',
+    'agresion',
+    'agresión',
+    'extorsion',
+    'extorsión',
+    'se llevaron mis cosas',
+    'ingresaron a mi casa',
+    'allanaron',
+    'estafa',
+    'fraude'
+  ];
+  return claves.some(k => t.includes(k));
 }
 
 // ---------------------------
 // Clasificador IA
 // ---------------------------
 async function clasificarMensaje(texto) {
-  // ⚠️ Importante: las materias deben coincidir con tu modelo/ReglasCompetencia
   const system = `
 Devuelve SOLO este JSON (sin texto adicional):
 
@@ -191,17 +210,21 @@ async function responderIA(session, texto) {
       };
     }
 
-    // Clasificar con IA
     const clasif = await clasificarMensaje(texto);
 
-    // Guardar contexto
     session.contexto.delitoEspecifico = clasif.delito_especifico || null;
-    session.contexto.materiaDetectada = clasif.materia || null;
+
+    // ✅ FIX: si es denuncia y no hay materia, asumir Penal (especialmente si el texto sugiere denuncia penal)
+    if (!clasif.materia && (clasif.tipo === 'denuncia' || textoSugiereDenunciaPenal(texto))) {
+      session.contexto.materiaDetectada = 'Penal';
+    } else {
+      session.contexto.materiaDetectada = clasif.materia || null;
+    }
 
     // ✅ Si la IA no encontró distrito, intentamos extraerlo del texto
     session.contexto.distritoTexto = clasif.distrito || extraerDistritoDesdeTexto(texto) || null;
 
-    // Si claramente es consulta y no denuncia, responder neutro (por ahora)
+    // Si claramente es consulta y no denuncia (por ahora)
     if (clasif.tipo === 'consulta' && session.estado === 'INICIO') {
       return {
         respuestaTexto:
@@ -210,7 +233,6 @@ async function responderIA(session, texto) {
       };
     }
 
-    // Pasar a derivación
     session.estado = 'DERIVACION';
   }
 
@@ -230,14 +252,14 @@ async function responderIA(session, texto) {
 
   // 3) Distrito (si se está esperando)
   if (session.estado === 'ESPERANDO_DISTRITO') {
-    // Capturar distrito SOLO aquí (evita que "hola" sea distrito)
+    // Capturar distrito SOLO aquí
     session.contexto.distritoTexto = texto;
     session.estado = 'DERIVACION';
   }
 
   // 4) Derivación
   if (session.estado === 'DERIVACION') {
-    // ✅ Fix adicional: si aún no hay distrito, intentar extraerlo del texto actual
+    // Fix adicional: si aún no hay distrito, intentar extraerlo del texto actual
     if (!session.contexto.distritoTexto) {
       session.contexto.distritoTexto = extraerDistritoDesdeTexto(texto) || null;
     }
@@ -259,7 +281,6 @@ async function responderIA(session, texto) {
       return { respuestaTexto: res.mensaje, session };
     }
 
-    // Si no se pudo derivar, pedimos más detalle sin resetear todo
     session.estado = 'ESPERANDO_RELATO';
     return {
       respuestaTexto:
@@ -268,7 +289,7 @@ async function responderIA(session, texto) {
     };
   }
 
-  // 5) Estado FINAL: permitir que el ciudadano continúe sin reiniciar
+  // 5) Estado FINAL
   if (session.estado === 'FINAL') {
     if (esInicioDenuncia(texto)) {
       session.estado = 'ESPERANDO_RELATO';

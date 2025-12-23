@@ -2,7 +2,7 @@
 // Lógica principal de IA – Ministerio Público (Fiscalía de Cajamarca)
 //
 // FUNCIÓN 1 (Derivación):
-// - Relato -> Materia -> Distrito -> Fiscalía competente
+// - Relato -> Materia -> Distrito -> (Vínculo si aplica) -> Fiscalía competente
 // - Manejo de estado y cierre conversacional
 
 const OpenAI = require('openai');
@@ -82,6 +82,14 @@ function pareceCasoFamilia(texto) {
     'alimentos',
     'pension',
     'pensión',
+    'divorcio',
+    'separacion',
+    'separación',
+    'filiacion',
+    'filiación',
+    'reconocimiento',
+    'conciliacion',
+    'conciliación',
     'hijo',
     'hija',
     'menor'
@@ -118,6 +126,27 @@ function textoSugiereDenunciaPenal(texto) {
   return claves.some(k => t.includes(k));
 }
 
+// ✅ NUEVO: si el texto indica agresor desconocido, no preguntar vínculo
+function sugiereAgresorDesconocido(texto) {
+  const t = normalize(texto);
+  const claves = [
+    'desconocido',
+    'desconocida',
+    'no lo conozco',
+    'no la conozco',
+    'no conozco a la persona',
+    'una persona desconocida',
+    'un desconocido',
+    'un sujeto',
+    'un señor',
+    'una señora',
+    'no se quien es',
+    'no sé quien es',
+    'no sé quién es'
+  ];
+  return claves.some(k => t.includes(k));
+}
+
 // ---------------------------
 // Clasificador IA
 // ---------------------------
@@ -139,6 +168,7 @@ Reglas:
 - Si no estás seguro de la materia, devuelve materia=null.
 - Si el texto menciona claramente un distrito, colócalo en "distrito"; si no, null.
 - No inventes delitos ni distritos.
+- Importante: usa "violencia" SOLO si el agresor es familiar/pareja/expareja o integrante del grupo familiar. Si es desconocido, usar "Penal".
 `.trim();
 
   const res = await openai.chat.completions.create({
@@ -184,7 +214,6 @@ async function responderIA(session, texto) {
   // 🔒 CIERRE DEFINITIVO: después del cierre, solo aceptar comandos
   // ---------------------------
   if (session.contexto?.cierreDefinitivo) {
-    // Reiniciar denuncia desde cualquier estado
     if (esInicioDenuncia(texto)) {
       session.estado = 'ESPERANDO_RELATO';
       session.contexto = {
@@ -202,7 +231,6 @@ async function responderIA(session, texto) {
       };
     }
 
-    // Volver al inicio (para que el menú del Messenger sea lo principal)
     if (tNorm === 'menu' || tNorm === 'menú' || tNorm === 'otra consulta') {
       session.estado = 'INICIO';
       session.contexto = null;
@@ -212,7 +240,6 @@ async function responderIA(session, texto) {
       };
     }
 
-    // Documentos
     if (tNorm === 'documentos' || tNorm === 'que documentos' || tNorm === 'qué documentos') {
       return {
         respuestaTexto:
@@ -221,7 +248,6 @@ async function responderIA(session, texto) {
       };
     }
 
-    // Si escribe cualquier otra cosa (ej. "hola"), no reabrimos conversación:
     return {
       respuestaTexto:
         'La orientación ha finalizado. Para continuar, escriba **Menú** o **Denuncia**.',
@@ -258,8 +284,10 @@ async function responderIA(session, texto) {
 
   // 1) Inicio / Relato
   if (session.estado === 'INICIO' || session.estado === 'ESPERANDO_RELATO') {
+    // Prioridad: casos civiles de familia
     if (pareceCasoFamilia(texto)) {
       session.contexto.materiaDetectada = 'familia';
+      session.contexto.vinculoRespuesta = null;
       session.estado = 'ESPERANDO_DISTRITO';
       return {
         respuestaTexto:
@@ -272,11 +300,17 @@ async function responderIA(session, texto) {
 
     session.contexto.delitoEspecifico = clasif.delito_especifico || null;
 
-    // Default Penal si es denuncia y la IA no define materia
-    if (!clasif.materia && (clasif.tipo === 'denuncia' || textoSugiereDenunciaPenal(texto))) {
+    // ✅ Si el relato dice "desconocido": asumir vínculo NO y derivar como Penal (sin preguntar vínculo)
+    if (sugiereAgresorDesconocido(texto)) {
+      session.contexto.vinculoRespuesta = 'NO';
       session.contexto.materiaDetectada = 'Penal';
     } else {
-      session.contexto.materiaDetectada = clasif.materia || null;
+      // Default Penal si es denuncia y la IA no define materia
+      if (!clasif.materia && (clasif.tipo === 'denuncia' || textoSugiereDenunciaPenal(texto))) {
+        session.contexto.materiaDetectada = 'Penal';
+      } else {
+        session.contexto.materiaDetectada = clasif.materia || null;
+      }
     }
 
     // Extraer distrito si la IA no lo detectó
@@ -350,7 +384,6 @@ async function responderIA(session, texto) {
 
   // 5) FINAL (anti-loop + reconoce 1 vez detalles y luego cierra definitivamente)
   if (session.estado === 'FINAL') {
-    // Comandos útiles
     if (tNorm === 'menu' || tNorm === 'menú' || tNorm === 'otra consulta') {
       session.estado = 'INICIO';
       session.contexto = null;
@@ -368,7 +401,6 @@ async function responderIA(session, texto) {
       };
     }
 
-    // Reconocer 1 vez un detalle adicional
     if (session.contexto.finalTurns < 1) {
       session.contexto.finalTurns += 1;
 
@@ -383,7 +415,7 @@ async function responderIA(session, texto) {
       };
     }
 
-    // ✅ Cierre definitivo (a partir de aquí se bloquea texto libre)
+    // ✅ Cierre definitivo
     session.contexto.cierreDefinitivo = true;
 
     return {

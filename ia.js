@@ -1,10 +1,9 @@
 // ia.js
 // Lógica principal de IA – Ministerio Público (Fiscalía de Cajamarca)
 //
-// Responsabilidades:
-// - Clasificar el mensaje del ciudadano (materia / delito específico / distrito)
-// - Gestionar el estado conversacional mínimo para la FUNCIÓN 1 (derivación a fiscalía)
-// - Delegar la lógica normativa de competencia a derivacion.js (resolverFiscalia)
+// FUNCIÓN 1 (Derivación):
+// - Relato -> Materia -> Distrito -> Fiscalía competente
+// - Manejo de estado y cierre conversacional
 
 const OpenAI = require('openai');
 const { resolverFiscalia } = require('./derivacion');
@@ -171,10 +170,63 @@ async function responderIA(session, texto) {
       delitoEspecifico: null,
       materiaDetectada: null,
       vinculoRespuesta: null,
-      finalTurns: 0 // ✅ para evitar loop y a la vez reconocer detalles 1 vez
+      finalTurns: 0,
+      cierreDefinitivo: false
     };
-  } else if (typeof session.contexto.finalTurns !== 'number') {
-    session.contexto.finalTurns = 0;
+  } else {
+    if (typeof session.contexto.finalTurns !== 'number') session.contexto.finalTurns = 0;
+    if (typeof session.contexto.cierreDefinitivo !== 'boolean') session.contexto.cierreDefinitivo = false;
+  }
+
+  const tNorm = normalize(texto);
+
+  // ---------------------------
+  // 🔒 CIERRE DEFINITIVO: después del cierre, solo aceptar comandos
+  // ---------------------------
+  if (session.contexto?.cierreDefinitivo) {
+    // Reiniciar denuncia desde cualquier estado
+    if (esInicioDenuncia(texto)) {
+      session.estado = 'ESPERANDO_RELATO';
+      session.contexto = {
+        distritoTexto: null,
+        delitoEspecifico: null,
+        materiaDetectada: null,
+        vinculoRespuesta: null,
+        finalTurns: 0,
+        cierreDefinitivo: false
+      };
+      return {
+        respuestaTexto:
+          'Perfecto. Cuéntame, por favor, ¿qué ocurrió? Puedes describir los hechos con tus palabras.',
+        session
+      };
+    }
+
+    // Volver al inicio (para que el menú del Messenger sea lo principal)
+    if (tNorm === 'menu' || tNorm === 'menú' || tNorm === 'otra consulta') {
+      session.estado = 'INICIO';
+      session.contexto = null;
+      return {
+        respuestaTexto: 'De acuerdo. Puedes elegir una opción del menú para continuar.',
+        session
+      };
+    }
+
+    // Documentos
+    if (tNorm === 'documentos' || tNorm === 'que documentos' || tNorm === 'qué documentos') {
+      return {
+        respuestaTexto:
+          'De forma general, se recomienda llevar: DNI (si lo tiene), una descripción clara de los hechos, datos de testigos (si existen) y cualquier evidencia disponible (fotos, mensajes, capturas, documentos). Si hay lesiones, un certificado o constancia médica puede ayudar.\n\nPara volver al inicio, escriba **Menú**. Para iniciar un nuevo caso, escriba **Denuncia**.',
+        session
+      };
+    }
+
+    // Si escribe cualquier otra cosa (ej. "hola"), no reabrimos conversación:
+    return {
+      respuestaTexto:
+        'La orientación ha finalizado. Para continuar, escriba **Menú** o **Denuncia**.',
+      session
+    };
   }
 
   // ✅ Regla fuerte: "denuncia" (incluso con typo) reinicia el flujo completo desde cualquier estado
@@ -185,7 +237,8 @@ async function responderIA(session, texto) {
       delitoEspecifico: null,
       materiaDetectada: null,
       vinculoRespuesta: null,
-      finalTurns: 0
+      finalTurns: 0,
+      cierreDefinitivo: false
     };
     return {
       respuestaTexto:
@@ -231,6 +284,7 @@ async function responderIA(session, texto) {
 
     // Reset de finalTurns al entrar a un caso nuevo
     session.contexto.finalTurns = 0;
+    session.contexto.cierreDefinitivo = false;
 
     if (clasif.tipo === 'consulta' && session.estado === 'INICIO') {
       return {
@@ -294,12 +348,10 @@ async function responderIA(session, texto) {
     };
   }
 
-  // 5) FINAL (anti-loop + reconoce 1 vez detalles adicionales)
+  // 5) FINAL (anti-loop + reconoce 1 vez detalles y luego cierra definitivamente)
   if (session.estado === 'FINAL') {
-    const t = normalize(texto);
-
-    // Comandos simples
-    if (t === 'otra consulta' || t === 'menu' || t === 'menú') {
+    // Comandos útiles
+    if (tNorm === 'menu' || tNorm === 'menú' || tNorm === 'otra consulta') {
       session.estado = 'INICIO';
       session.contexto = null;
       return {
@@ -308,36 +360,40 @@ async function responderIA(session, texto) {
       };
     }
 
-    if (t === 'documentos' || t === 'que documentos' || t === 'qué documentos') {
+    if (tNorm === 'documentos' || tNorm === 'que documentos' || tNorm === 'qué documentos') {
       return {
         respuestaTexto:
-          'De forma general, se recomienda llevar: DNI (si lo tiene), una descripción clara de los hechos, datos de testigos (si existen) y cualquier evidencia disponible (fotos, mensajes, capturas, documentos). Si hay lesiones, un certificado o constancia médica puede ayudar.\n\nSi deseas, puedo orientarte mejor si me indicas el distrito y el tipo de caso.',
+          'De forma general, se recomienda llevar: DNI (si lo tiene), una descripción clara de los hechos, datos de testigos (si existen) y cualquier evidencia disponible (fotos, mensajes, capturas, documentos). Si hay lesiones, un certificado o constancia médica puede ayudar.\n\nPara volver al inicio, escriba **Menú**. Para iniciar un nuevo caso, escriba **Denuncia**.',
         session
       };
     }
 
-    // ✅ Reconocer 1 vez un detalle adicional (sin loop)
-    if (session.contexto && session.contexto.finalTurns < 1) {
+    // Reconocer 1 vez un detalle adicional
+    if (session.contexto.finalTurns < 1) {
       session.contexto.finalTurns += 1;
 
       return {
         respuestaTexto:
           'Gracias por el detalle. Con esa información, la orientación se mantiene.\n\n' +
-          'Si deseas, puedo ayudarte con lo siguiente:\n' +
-          '1️⃣ Escribir **Documentos** para saber qué llevar.\n' +
-          '2️⃣ Escribir **Otra consulta** para iniciar un nuevo caso.',
+          'Puede:\n' +
+          '📂 Escribir **Documentos** para saber qué llevar.\n' +
+          '🔁 Escribir **Menú** para volver al inicio.\n' +
+          '📝 Escribir **Denuncia** para iniciar un nuevo caso.',
         session
       };
     }
 
-    // Cierre por defecto (sin loop)
+    // ✅ Cierre definitivo (a partir de aquí se bloquea texto libre)
+    session.contexto.cierreDefinitivo = true;
+
     return {
       respuestaTexto:
-        'La orientación principal ya fue brindada.\n\n' +
-        'Puede:\n' +
-        '1️⃣ Presentar su denuncia en la fiscalía indicada.\n' +
-        '2️⃣ Escribir **Documentos** para saber qué llevar.\n' +
-        '3️⃣ Escribir **Otra consulta** para iniciar un nuevo caso.',
+        'La orientación ha finalizado.\n\n' +
+        'Para continuar, puede:\n' +
+        '📝 Escribir **Denuncia** para iniciar un nuevo caso.\n' +
+        '📂 Escribir **Documentos** para saber qué llevar.\n' +
+        '🔁 Escribir **Menú** para volver al inicio.\n\n' +
+        'Gracias por comunicarse con el Ministerio Público – Distrito Fiscal de Cajamarca.',
       session
     };
   }

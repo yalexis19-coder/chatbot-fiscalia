@@ -50,7 +50,6 @@ function esInicioDenuncia(texto) {
 }
 
 function pareceCasoFamilia(texto) {
-  // Heurística simple para consultas típicas de familia
   return [
     'no me deja ver',
     'me impide ver',
@@ -67,11 +66,9 @@ function pareceCasoFamilia(texto) {
   ].some(k => normalize(texto).includes(normalize(k)));
 }
 
-// ✅ Extrae un posible distrito desde el texto: "en la encañada", "en cajabamba", etc.
+// Extrae posible distrito desde el texto: "en la encañada", "en cajabamba", etc.
 function extraerDistritoDesdeTexto(texto) {
   const t = normalize(texto);
-
-  // Buscar " en <algo>" o " en la/el/los/las <algo>"
   const m = t.match(/\ben\s+(la|el|los|las)?\s*([a-z0-9ñ\s\-\(\)]+?)(?=$|[.,;:!?\n])/i);
   if (!m) return null;
 
@@ -79,11 +76,8 @@ function extraerDistritoDesdeTexto(texto) {
   if (!candidato) return null;
 
   candidato = candidato.replace(/\s+/g, ' ').trim();
-
-  // demasiado largo = probablemente no es distrito
   if (candidato.length > 40) return null;
 
-  // descartes comunes
   const descartes = new Set(['mi casa', 'casa', 'la calle', 'mi barrio', 'el barrio', 'la ciudad']);
   if (descartes.has(candidato)) return null;
 
@@ -92,27 +86,12 @@ function extraerDistritoDesdeTexto(texto) {
 
 function textoSugiereDenunciaPenal(texto) {
   const t = normalize(texto);
-  // Palabras típicas de denuncias penales (no exhaustivo)
   const claves = [
-    'robo',
-    'me robaron',
-    'asalto',
-    'me asaltaron',
-    'hurto',
-    'me hurtaron',
-    'me quitaron',
-    'me arrebataron',
-    'me amenazaron',
-    'me golpearon',
-    'agresion',
-    'agresión',
-    'extorsion',
-    'extorsión',
-    'se llevaron mis cosas',
-    'ingresaron a mi casa',
-    'allanaron',
-    'estafa',
-    'fraude'
+    'robo', 'me robaron', 'asalto', 'me asaltaron', 'hurto', 'me hurtaron',
+    'me quitaron', 'me arrebataron', 'me amenazaron', 'me golpearon',
+    'agresion', 'agresión', 'extorsion', 'extorsión',
+    'se llevaron mis cosas', 'ingresaron a mi casa', 'allanaron',
+    'estafa', 'fraude'
   ];
   return claves.some(k => t.includes(k));
 }
@@ -136,7 +115,7 @@ Reglas:
 - Si pide información general (horarios, ubicación, trámites, etc.), usa tipo="consulta".
 - "materia" debe ser UNA de las opciones exactas listadas.
 - Si no estás seguro de la materia, devuelve materia=null.
-- Si el texto menciona claramente un distrito (p. ej. "La Encañada", "Cachachi"), colócalo en "distrito"; si no, null.
+- Si el texto menciona claramente un distrito, colócalo en "distrito"; si no, null.
 - No inventes delitos ni distritos.
 `.trim();
 
@@ -199,7 +178,6 @@ async function responderIA(session, texto) {
 
   // 1) Inicio / Relato
   if (session.estado === 'INICIO' || session.estado === 'ESPERANDO_RELATO') {
-    // Heurística familia (consulta típica): no forzar "penal" si es civil/familia
     if (pareceCasoFamilia(texto)) {
       session.contexto.materiaDetectada = 'familia';
       session.estado = 'ESPERANDO_DISTRITO';
@@ -214,17 +192,16 @@ async function responderIA(session, texto) {
 
     session.contexto.delitoEspecifico = clasif.delito_especifico || null;
 
-    // ✅ FIX: si es denuncia y no hay materia, asumir Penal (especialmente si el texto sugiere denuncia penal)
+    // ✅ Default Penal si es denuncia y la IA no define materia
     if (!clasif.materia && (clasif.tipo === 'denuncia' || textoSugiereDenunciaPenal(texto))) {
       session.contexto.materiaDetectada = 'Penal';
     } else {
       session.contexto.materiaDetectada = clasif.materia || null;
     }
 
-    // ✅ Si la IA no encontró distrito, intentamos extraerlo del texto
+    // ✅ Extraer distrito si la IA no lo detectó
     session.contexto.distritoTexto = clasif.distrito || extraerDistritoDesdeTexto(texto) || null;
 
-    // Si claramente es consulta y no denuncia (por ahora)
     if (clasif.tipo === 'consulta' && session.estado === 'INICIO') {
       return {
         respuestaTexto:
@@ -236,7 +213,7 @@ async function responderIA(session, texto) {
     session.estado = 'DERIVACION';
   }
 
-  // 2) Vínculo familiar (si se está esperando)
+  // 2) Vínculo familiar
   if (session.estado === 'ESPERANDO_VINCULO') {
     const resp = esRespuestaSiNo(texto);
     if (!resp) {
@@ -250,16 +227,14 @@ async function responderIA(session, texto) {
     session.estado = 'DERIVACION';
   }
 
-  // 3) Distrito (si se está esperando)
+  // 3) Distrito (solo cuando lo pedimos)
   if (session.estado === 'ESPERANDO_DISTRITO') {
-    // Capturar distrito SOLO aquí
     session.contexto.distritoTexto = texto;
     session.estado = 'DERIVACION';
   }
 
   // 4) Derivación
   if (session.estado === 'DERIVACION') {
-    // Fix adicional: si aún no hay distrito, intentar extraerlo del texto actual
     if (!session.contexto.distritoTexto) {
       session.contexto.distritoTexto = extraerDistritoDesdeTexto(texto) || null;
     }
@@ -289,8 +264,11 @@ async function responderIA(session, texto) {
     };
   }
 
-  // 5) Estado FINAL
+  // 5) FINAL (✅ anti-loop: cerrar y dar opciones)
   if (session.estado === 'FINAL') {
+    const t = normalize(texto);
+
+    // Reiniciar si quiere denunciar otra vez
     if (esInicioDenuncia(texto)) {
       session.estado = 'ESPERANDO_RELATO';
       session.contexto = {
@@ -305,9 +283,32 @@ async function responderIA(session, texto) {
       };
     }
 
+    // Comandos simples
+    if (t === 'otra consulta' || t === 'menu' || t === 'menú') {
+      session.estado = 'INICIO';
+      session.contexto = null;
+      return {
+        respuestaTexto: 'De acuerdo. Puedes elegir una opción del menú para continuar.',
+        session
+      };
+    }
+
+    if (t === 'documentos' || t === 'que documentos' || t === 'qué documentos') {
+      return {
+        respuestaTexto:
+          'De forma general, se recomienda llevar: DNI (si lo tiene), una descripción clara de los hechos, datos de testigos (si existen) y cualquier evidencia disponible (fotos, mensajes, capturas, documentos). Si hay lesiones, un certificado o constancia médica puede ayudar.\n\nSi deseas, dime el distrito y el tipo de caso para orientarte mejor.',
+        session
+      };
+    }
+
+    // Cierre por defecto (sin loop)
     return {
       respuestaTexto:
-        '¿Deseas agregar algún detalle adicional del caso (por ejemplo, fecha, lugar o si conoces a la persona involucrada)?',
+        'La orientación principal ya fue brindada.\n\n' +
+        'Puede:\n' +
+        '1️⃣ Presentar su denuncia en la fiscalía indicada.\n' +
+        '2️⃣ Escribir **Documentos** para saber qué llevar.\n' +
+        '3️⃣ Escribir **Otra consulta** para iniciar un nuevo caso.',
       session
     };
   }

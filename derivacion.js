@@ -1,452 +1,224 @@
 // derivacion.js
-// Motor de derivación del chatbot institucional
-// Usa knowledge.json (generado desde el Excel) para determinar la fiscalía competente.
+// Motor de derivación (Función 1): relato/delito + distrito (+ vínculo si aplica) => fiscalía competente + datos
 
-const path = require('path');
 const knowledge = require('./knowledge.json');
 
 // ---------------------------
-// Helpers de texto
+// Utilitarios
 // ---------------------------
-
-const s = (value) =>
-  value === undefined || value === null ? '' : String(value).trim();
-
 const normalize = (str) =>
-  s(str)
+  (str || '')
+    .toString()
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '') // quita tildes
+    .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
-    .replace(/\s+/g, ' ')
     .trim();
 
-// ---------------------------
-// Búsqueda de distrito
-// ---------------------------
-
-/**
- * Busca distritos que matcheen el texto del usuario.
- * Devuelve:
- *  - { tipo: 'NO_ENCONTRADO' }
- *  - { tipo: 'UNICO', distrito }
- *  - { tipo: 'AMBIGUO', opciones: [distrito, ...] }
- */
-function buscarDistritoPorNombre(distritoTexto) {
-  const query = normalize(distritoTexto);
-
-  if (!query) {
-    return { tipo: 'NO_ENCONTRADO' };
-  }
-
-  // Match por nombre de distrito (puede estar "Bambamarca" o "Bambamarca (Hualgayoc)")
-  const matches = knowledge.distritos.filter((d) => {
-    const nDist = normalize(d.distrito);
-    return nDist.includes(query) || query.includes(nDist);
-  });
-
-  if (matches.length === 0) {
-    return { tipo: 'NO_ENCONTRADO' };
-  }
-
-  if (matches.length === 1) {
-    return { tipo: 'UNICO', distrito: matches[0] };
-  }
-
-  // Más de uno: Bambamarca (Bolívar) / Bambamarca (Hualgayoc), etc.
-  return { tipo: 'AMBIGUO', opciones: matches };
+function isBlank(v) {
+  return v === null || v === undefined || normalize(v) === '';
 }
 
-// ---------------------------
-// Búsqueda de fiscalía por código
-// ---------------------------
+function materiaCanonica(m) {
+  const t = normalize(m);
+  if (!t) return null;
 
-function buscarFiscaliaPorCodigo(codigo) {
-  if (!codigo) return null;
+  const exact = {
+    'corrupcion': 'Corrupción',
+    'penal': 'Penal',
+    'violencia': 'violencia',
+    'prevencion': 'Prevencion',
+    'familia': 'familia',
+    'crimen organizado': 'Crimen Organizado',
+    'derechos humanos': 'Derechos Humanos',
+    'extincion de dominio': 'Extinción de Dominio',
+    'materia ambiental': 'Materia Ambiental'
+  };
+  if (exact[t]) return exact[t];
+
+  // tolerancia
+  if (t.includes('ambient')) return 'Materia Ambiental';
+  if (t.includes('corrup')) return 'Corrupción';
+  if (t.includes('extinc')) return 'Extinción de Dominio';
+  if (t.includes('derech')) return 'Derechos Humanos';
+  if (t.includes('crimen') || t.includes('organiza')) return 'Crimen Organizado';
+  if (t.includes('prevenc')) return 'Prevencion';
+  if (t.includes('violenc')) return 'violencia';
+  if (t.includes('famil')) return 'familia';
+  if (t.includes('penal')) return 'Penal';
+
+  return null;
+}
+
+function findDistritoRecord(distritos, distritoTexto) {
+  const d = normalize(distritoTexto);
+  if (!d) return null;
+
+  // 1) exacto
+  let rec = distritos.find((x) => normalize(x.distrito) === d);
+  if (rec) return rec;
+
+  // 2) contiene / variante
+  rec = distritos.find((x) => normalize(x.distrito).includes(d) || d.includes(normalize(x.distrito)));
+  return rec || null;
+}
+
+function findFiscaliaByCodigo(fiscalias, codigo) {
+  const c = normalize(codigo);
+  return fiscalias.find((f) => normalize(f.codigo_fiscalia) === c) || null;
+}
+
+function findReglaDistrito(reglas, materia, distrito) {
+  const m = normalize(materia);
+  const d = normalize(distrito);
   return (
-    knowledge.fiscalias.find(
-      (f) => normalize(f.codigo_fiscalia) === normalize(codigo)
+    reglas.find(
+      (r) =>
+        normalize(r.materia) === m &&
+        normalize(r.alcance) === normalize('Distrito') &&
+        normalize(r.distrito) === d
     ) || null
   );
 }
 
-// ---------------------------
-// Búsqueda de delito (competencia) por nombre ESPECIFICO
-// ---------------------------
-
-/**
- * Busca un delito en la hoja Competencias, por el campo ESPECIFICO.
- * El match es case-insensitive y sin tildes.
- */
-function buscarDelitoPorNombre(especificoTexto) {
-  const query = normalize(especificoTexto);
-  if (!query) return null;
-
-  // 1) Intentar match exacto
-  let exactMatches = knowledge.competencias.filter((c) => {
-    const nEsp = normalize(c.especifico);
-    return nEsp === query;
-  });
-
-  if (exactMatches.length === 1) {
-    return exactMatches[0];
-  }
-  if (exactMatches.length > 1) {
-    // Demasiada ambigüedad, no elegimos
-    return null;
-  }
-
-  // 2) Intentar que el ESPECIFICO contenga al query o viceversa
-  let partialMatches = knowledge.competencias.filter((c) => {
-    const nEsp = normalize(c.especifico);
-    return nEsp.includes(query) || query.includes(nEsp);
-  });
-
-  if (partialMatches.length === 1) {
-    return partialMatches[0];
-  }
-
-  // Si hay muchas coincidencias (ej. varios tipos de robo), preferimos no inventar
-  return null;
+function findReglaDistritoFiscal(reglas, materia) {
+  const m = normalize(materia);
+  return (
+    reglas.find(
+      (r) =>
+        normalize(r.materia) === m &&
+        normalize(r.alcance) === normalize('Distrito Fiscal') &&
+        isBlank(r.distrito)
+    ) || null
+  );
 }
 
-// ---------------------------
-// Determinar materia final
-// ---------------------------
-
-/**
- * Determina la materia final del caso.
- *
- * @param {Object} params
- * @param {Object|null} params.delito  - fila de Competencias o null
- * @param {string|null} params.materiaDetectada - materia general detectada por IA ('Penal', 'Prevención', etc.)
- * @param {('SI'|'NO'|'DEPENDE'|null)} params.vinculoRespuesta - respuesta del ciudadano
- *
- * Devuelve:
- *  - { necesitaPreguntaVinculo: true }  (cuando hay que preguntar)
- *  - { materiaFinal: 'Penal' | 'Violencia Familiar' | 'Familia' | ... }
- */
-function determinarMateriaFinal({ delito, materiaDetectada, vinculoRespuesta }) {
-  // Normalizamos algunos valores
-  const materiaIA = s(materiaDetectada);
-  const base = delito ? s(delito.categoria) : materiaIA;
-  const requiere = delito ? s(delito.requiere_vinculo_familiar).toUpperCase() : '';
-  const catSiFamiliar = delito ? s(delito.categoria_si_familiar) : '';
-
-  // Si no tenemos delito ni materia detectada, no podemos seguir
-  if (!base) {
-    return { materiaFinal: null };
-  }
-
-  // Materias que no usan vínculo en absoluto
-  const materiasSinVinculo = [
-    'MATERIA AMBIENTAL',
-    'AMBIENTAL',
-    'CORRUPCION',
-    'CORRUPCIÓN',
-    'CRIMEN ORGANIZADO',
-    'EXTINCION DE DOMINIO',
-    'EXTINCIÓN DE DOMINIO',
-    'DERECHOS HUMANOS',
-    'PREVENCION',
-    'PREVENCIÓN',
-    'FAMILIA'
-  ];
-
-  if (materiasSinVinculo.includes(base.toUpperCase())) {
-    return { materiaFinal: normalizarNombreMateria(base) };
-  }
-
-  // Si ya es violencia familiar, no hay nada que preguntar
-  if (base.toUpperCase() === 'VIOLENCIA FAMILIAR') {
-    return { materiaFinal: 'Violencia Familiar' };
-  }
-
-  // Casos SIN dependencia de vínculo (Penal siempre)
-  if (requiere === 'NO' || requiere === '') {
-    return { materiaFinal: normalizarNombreMateria(base) };
-  }
-
-  // Casos que siempre requieren vínculo, pero ya son VF u otra materia
-  if (requiere === 'SI') {
-    if (catSiFamiliar) {
-      return { materiaFinal: normalizarNombreMateria(catSiFamiliar) };
-    }
-    return { materiaFinal: normalizarNombreMateria(base) };
-  }
-
-  // Casos DEPENDE → hay que preguntar si no tenemos respuesta
-  if (requiere === 'DEPENDE') {
-    if (!vinculoRespuesta) {
-      return { necesitaPreguntaVinculo: true };
-    }
-
-    const resp = s(vinculoRespuesta).toUpperCase();
-    if (resp === 'SI') {
-      // Pasamos a la categoría si familiar, ej. Violencia Familiar
-      return {
-        materiaFinal: normalizarNombreMateria(catSiFamiliar || base)
-      };
-    } else {
-      // NO → se queda como base (normalmente Penal)
-      return { materiaFinal: normalizarNombreMateria(base) };
-    }
-  }
-
-  // Default
-  return { materiaFinal: normalizarNombreMateria(base) };
+function findCompetenciaByEspecifico(competencias, delitoEspecifico) {
+  const e = normalize(delitoEspecifico);
+  if (!e) return null;
+  return competencias.find((c) => normalize(c.especifico) === e) || null;
 }
 
-function normalizarNombreMateria(m) {
-  const t = s(m).toLowerCase();
-  if (t.includes('penal')) return 'Penal';
-  if (t.includes('violencia')) return 'Violencia Familiar';
-  if (t.includes('familia')) return 'Familia';
-  if (t.includes('ambient')) return 'Materia Ambiental';
-  if (t.includes('corrup')) return 'Corrupción';
-  if (t.includes('crimen')) return 'Crimen Organizado';
-  if (t.includes('extinc')) return 'Extinción de Dominio';
-  if (t.includes('derechos')) return 'Derechos Humanos';
-  if (t.includes('prevenc')) return 'Prevención';
-  return s(m);
-}
+function formatearRespuestaFiscalia({ fiscalia, observacion, materia, distrito }) {
+  const lineas = [];
 
-// ---------------------------
-// Búsqueda de regla de competencia
-// ---------------------------
+  lineas.push(`Según la información brindada, su caso correspondería a la materia **${materia}**.`);
+  lineas.push(`Distrito indicado: **${distrito}**.`);
 
-/**
- * Busca una regla de competencia según materia y distrito.
- *
- * 1. Primero intenta match específico materia + distrito (alcance = 'distrito')
- * 2. Luego prueba regla general por distrito fiscal (alcance = 'distrito_fiscal')
- */
-function buscarReglaCompetencia(materiaFinal, nombreDistrito) {
-  const mat = normalizarNombreMateria(materiaFinal);
-  const distNorm = normalize(nombreDistrito);
-
-  // 1) Reglas por distrito
-  const reglasDistrito = knowledge.reglasCompetencia.filter((r) => {
-    return (
-      normalizarNombreMateria(r.materia) === mat &&
-      s(r.alcance).toLowerCase() === 'distrito' &&
-      normalize(r.distrito) === distNorm
-    );
-  });
-
-  if (reglasDistrito.length > 0) {
-    return reglasDistrito[0];
-  }
-
-  // 2) Reglas por distrito_fiscal
-  const reglasDF = knowledge.reglasCompetencia.filter((r) => {
-    return (
-      normalizarNombreMateria(r.materia) === mat &&
-      s(r.alcance).toLowerCase() === 'distrito_fiscal'
-    );
-  });
-
-  if (reglasDF.length > 0) {
-    return reglasDF[0];
-  }
-
-  return null;
-}
-
-// ---------------------------
-// Respuesta orientadora
-// ---------------------------
-
-function armarRespuestaOrientadora({ materiaFinal, delito, distrito, fiscalia, observacion }) {
-  const nombreDelito = delito ? s(delito.especifico) : '';
-  const descDelito = delito ? s(delito.descripcion) : '';
-
-  let textoDelito = '';
-  if (nombreDelito) {
-    textoDelito =
-      `Por lo que usted relata, podría tratarse de un hecho vinculado al delito de ${nombreDelito}. `;
-
-    if (descDelito) {
-      textoDelito += descDelito + ' ';
-    }
-  }
-
-  let textoFiscalia = '';
   if (fiscalia) {
-    textoFiscalia =
-      `Puede presentar su denuncia en la ${fiscalia.nombre_fiscalia}, ` +
-      `ubicada en ${fiscalia.direccion}. `;
-
-    if (fiscalia.telefono) {
-      textoFiscalia += `Teléfono: ${fiscalia.telefono}. `;
-    }
-    if (fiscalia.horario) {
-      textoFiscalia += `Horario de atención: ${fiscalia.horario}. `;
-    }
+    lineas.push(`\n📌 **Fiscalía sugerida:** ${fiscalia.nombre_fiscalia}`);
+    if (fiscalia.direccion) lineas.push(`📍 Dirección: ${fiscalia.direccion}`);
+    if (fiscalia.telefono) lineas.push(`☎️ Teléfono: ${fiscalia.telefono}`);
+    if (fiscalia.horario) lineas.push(`🕒 Horario: ${fiscalia.horario}`);
   }
 
-  const textoObs = observacion ? observacion + ' ' : '';
+  if (observacion && normalize(observacion) !== '') {
+    lineas.push(`\nℹ️ Nota: ${observacion}`);
+  }
 
-  const textoDistrito = distrito
-    ? `Esta orientación se brinda para hechos ocurridos en el distrito de ${distrito.distrito}, provincia de ${distrito.provincia}. `
-    : '';
+  lineas.push(`\nSi desea, puede contarme un poco más de lo ocurrido para afinar la orientación.`);
 
-  const mensaje =
-    textoDelito + textoDistrito + textoFiscalia + textoObs;
-
-  return mensaje.trim();
+  return lineas.join('\n');
 }
 
 // ---------------------------
-// Función principal: resolverFiscalia
+// Motor principal
 // ---------------------------
+function resolverFiscalia(contexto) {
+  const competencias = Array.isArray(knowledge.competencias) ? knowledge.competencias : [];
+  const reglas = Array.isArray(knowledge.reglasCompetencia) ? knowledge.reglasCompetencia : [];
+  const distritos = Array.isArray(knowledge.distritos) ? knowledge.distritos : [];
+  const fiscalias = Array.isArray(knowledge.fiscalias) ? knowledge.fiscalias : [];
 
-/**
- * Función principal que usará ia.js
- *
- * @param {Object} params
- * @param {string} params.distritoTexto          - texto del usuario sobre el distrito ("Cajamarca", "Bambamarca", etc.)
- * @param {string|null} params.delitoEspecifico  - nombre del delito específico (ESPECIFICO en Competencias)
- * @param {string|null} params.materiaDetectada  - materia general detectada por la IA (opcional)
- * @param {('SI'|'NO'|null)} params.vinculoRespuesta - respuesta del usuario sobre vínculo familiar
- *
- * Devuelve un objeto:
- *  - { status: 'OK', mensaje, materiaFinal, fiscalia, distrito, delito }
- *  - { status: 'ASK_DISTRITO', mensaje }
- *  - { status: 'ASK_DISTRITO_AMBIGUO', mensaje, opciones: [...] }
- *  - { status: 'ASK_VINCULO', mensaje }
- *  - { status: 'ERROR', mensaje }
- */
-function resolverFiscalia({ distritoTexto, delitoEspecifico, materiaDetectada, vinculoRespuesta }) {
-  // 1) Buscar distrito
-  const resDistrito = buscarDistritoPorNombre(distritoTexto || '');
+  // 1) Materia base (desde IA)
+  let materia = materiaCanonica(contexto?.materiaDetectada);
 
-  if (resDistrito.tipo === 'NO_ENCONTRADO') {
+  // 2) Si viene delito específico, afinamos materia + vínculo
+  const comp = findCompetenciaByEspecifico(competencias, contexto?.delitoEspecifico);
+
+  let requiereVinculo = null; // 'SI' | 'NO' | 'DEPENDE' | ''
+  let categoriaSiFamiliar = null;
+
+  if (comp) {
+    if (!materia) materia = materiaCanonica(comp.categoria);
+    requiereVinculo = (comp.requiere_vinculo_familiar || '').toString().trim().toUpperCase();
+    categoriaSiFamiliar = comp.categoria_si_familiar || null;
+  }
+
+  if (!materia) {
     return {
-      status: 'ASK_DISTRITO',
-      mensaje: 'Por favor, indíqueme en qué distrito ocurrieron los hechos (por ejemplo: Cajamarca, Baños del Inca, La Encañada).'
+      status: 'ASK_CLARIFY',
+      mensaje: 'Para orientarle correctamente, por favor cuénteme brevemente qué ocurrió (o indique el tipo de caso: Penal, violencia, familia, etc.).'
     };
   }
 
-  if (resDistrito.tipo === 'AMBIGUO') {
-    const opciones = resDistrito.opciones.map((d) => ({
-      etiqueta: `${d.distrito} (Provincia ${d.provincia})`,
-      distrito: d.distrito,
-      provincia: d.provincia
-    }));
+  // 3) Vínculo familiar (solo si DEPENDE)
+  if (requiereVinculo === 'DEPENDE') {
+    const v = (contexto?.vinculoRespuesta || '').toString().trim().toUpperCase();
+    if (v !== 'SI' && v !== 'NO') {
+      return {
+        status: 'ASK_VINCULO',
+        mensaje: '¿La persona denunciada es su pareja, expareja o un familiar cercano? Responda solo **sí** o **no**.'
+      };
+    }
 
-    const listado = opciones
-      .map((o, idx) => `${idx + 1}. ${o.etiqueta}`)
-      .join('\n');
-
-    return {
-      status: 'ASK_DISTRITO_AMBIGUO',
-      mensaje:
-        'En el Distrito Fiscal de Cajamarca existen varios distritos con un nombre similar. ' +
-        'Por favor, indíqueme a cuál se refiere:\n' +
-        listado,
-      opciones
-    };
-  }
-
-  const distrito = resDistrito.distrito;
-
-  // 2) Buscar delito (fila de Competencias), si se proporcionó
-  let delito = null;
-  if (delitoEspecifico) {
-    delito = buscarDelitoPorNombre(delitoEspecifico);
-  }
-
-  // 3) Determinar materia final
-  const resMateria = determinarMateriaFinal({
-    delito,
-    materiaDetectada,
-    vinculoRespuesta
-  });
-
-  if (resMateria.necesitaPreguntaVinculo) {
-    return {
-      status: 'ASK_VINCULO',
-      mensaje:
-        'Para orientarle mejor, ¿la persona agresora es parte de su grupo familiar ' +
-        '(pareja, ex pareja, conviviente, padre, madre, hijo/a u otro integrante del hogar)? ' +
-        'Responda "sí" o "no", por favor.'
-    };
-  }
-
-  const materiaFinal = resMateria.materiaFinal;
-
-  if (!materiaFinal) {
-    return {
-      status: 'ERROR',
-      mensaje:
-        'No pude determinar la materia del caso con la información disponible. ' +
-        'Por favor, describa nuevamente los hechos con el mayor detalle posible.'
-    };
-  }
-
-  // 4) Buscar regla de competencia
-  const regla = buscarReglaCompetencia(materiaFinal, distrito.distrito);
-
-  let codigoFiscalia = null;
-  let observacion = null;
-
-  if (regla) {
-    codigoFiscalia = regla.fiscalia_destino_codigo;
-    observacion = s(regla.observacion_opcional);
-  } else {
-    // Fallback seguro: usamos datos de la hoja Distritos
-    const mat = materiaFinal;
-
-    if (mat === 'Penal') {
-      codigoFiscalia = distrito.fiscalia_penal_mixta_codigo;
-    } else if (mat === 'Familia') {
-      codigoFiscalia = distrito.fiscalia_familia_codigo || distrito.fiscalia_penal_mixta_codigo;
-    } else if (mat === 'Prevención') {
-      codigoFiscalia =
-        distrito.fiscalia_prevencion_codigo || distrito.fiscalia_penal_mixta_codigo;
-    } else if (mat === 'Violencia Familiar') {
-      if (distrito.fiscalia_violencia_codigo) {
-        codigoFiscalia = distrito.fiscalia_violencia_codigo;
-      } else {
-        codigoFiscalia = distrito.fiscalia_penal_mixta_codigo;
-      }
-    } else {
-      // materias especializadas sin regla → derivar a penal/mixta y que se derive internamente
-      codigoFiscalia = distrito.fiscalia_penal_mixta_codigo;
-      observacion =
-        observacion ||
-        'Si el hecho corresponde a una materia especializada, la Fiscalía de su distrito derivará la denuncia a la Fiscalía competente.';
+    if (v === 'SI' && categoriaSiFamiliar) {
+      const m2 = materiaCanonica(categoriaSiFamiliar);
+      if (m2) materia = m2;
     }
   }
 
-  const fiscalia = buscarFiscaliaPorCodigo(codigoFiscalia);
+  // 4) Distrito
+  const distritoTexto = contexto?.distritoTexto;
+  if (!distritoTexto || normalize(distritoTexto) === '') {
+    return { status: 'ASK_DISTRITO', mensaje: 'Indíqueme por favor **en qué distrito** ocurrieron los hechos.' };
+  }
 
-  // 5) Armar mensaje orientador
-  const mensaje = armarRespuestaOrientadora({
-    materiaFinal,
-    delito,
-    distrito,
-    fiscalia,
-    observacion
-  });
+  const distritoRec = findDistritoRecord(distritos, distritoTexto);
+  const distritoFinal = distritoRec?.distrito || distritoTexto;
+
+  // 5) Priorización (ReglasCompetencia)
+  //    Prioridad A: Materia + Alcance=District + distrito exacto
+  //    Prioridad B: Materia + Alcance=Distrito Fiscal y distrito vacío
+  let regla = findReglaDistrito(reglas, materia, distritoFinal);
+  if (!regla) regla = findReglaDistritoFiscal(reglas, materia);
+
+  let codigoFiscalia = regla?.fiscalia_destino_codigo || null;
+  let observacion = regla?.observacion_opcional || '';
+
+  // 6) Fallback por hoja Distritos (si no hay regla)
+  if (!codigoFiscalia && distritoRec) {
+    const m = normalize(materia);
+
+    if (m === normalize('violencia')) {
+      const tiene = normalize(distritoRec.tiene_fiscalia_violencia) === 'si';
+      if (tiene && distritoRec.fiscalia_violencia_codigo) codigoFiscalia = distritoRec.fiscalia_violencia_codigo;
+      else if (distritoRec.fiscalia_penal_mixta_codigo) codigoFiscalia = distritoRec.fiscalia_penal_mixta_codigo;
+    } else if (m === normalize('penal')) {
+      if (distritoRec.fiscalia_penal_mixta_codigo) codigoFiscalia = distritoRec.fiscalia_penal_mixta_codigo;
+    } else if (m === normalize('familia')) {
+      if (distritoRec.fiscalia_familia_codigo) codigoFiscalia = distritoRec.fiscalia_familia_codigo;
+      else if (distritoRec.fiscalia_penal_mixta_codigo) codigoFiscalia = distritoRec.fiscalia_penal_mixta_codigo;
+    } else if (m === normalize('prevencion')) {
+      if (distritoRec.fiscalia_prevencion_codigo) codigoFiscalia = distritoRec.fiscalia_prevencion_codigo;
+    }
+  }
+
+  const fiscalia = codigoFiscalia ? findFiscaliaByCodigo(fiscalias, codigoFiscalia) : null;
+
+  if (!codigoFiscalia || !fiscalia) {
+    return {
+      status: 'NO_MATCH',
+      mensaje:
+        'Por ahora no pude ubicar con precisión la fiscalía competente con los datos brindados. ¿Podría indicar nuevamente el distrito y un resumen breve de lo ocurrido?'
+    };
+  }
 
   return {
     status: 'OK',
-    mensaje,
-    materiaFinal,
+    codigoFiscalia,
     fiscalia,
-    distrito,
-    delito
+    mensaje: formatearRespuestaFiscalia({ fiscalia, observacion, materia, distrito: distritoFinal })
   };
 }
 
-// ---------------------------
-// Exportar funciones
-// ---------------------------
-
-module.exports = {
-  resolverFiscalia,
-  buscarDistritoPorNombre,
-  determinarMateriaFinal,
-  buscarReglaCompetencia
-};
+module.exports = { resolverFiscalia };

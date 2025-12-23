@@ -7,7 +7,6 @@
 // - Delegar la lógica normativa de competencia a derivacion.js (resolverFiscalia)
 //
 // Requiere:
-// - knowledge.json (cargado por derivacion.js)
 // - derivacion.js (exporta resolverFiscalia)
 
 const OpenAI = require('openai');
@@ -71,6 +70,33 @@ function pareceCasoFamilia(texto) {
   ].some(k => normalize(texto).includes(normalize(k)));
 }
 
+// ✅ Extrae un posible distrito desde el texto: "en la encañada", "en cajabamba", etc.
+function extraerDistritoDesdeTexto(texto) {
+  const t = normalize(texto);
+
+  // Buscar " en <algo>" o " en la/el/los/las <algo>"
+  // Capturamos hasta 40 caracteres o hasta un separador
+  const m = t.match(/\ben\s+(la|el|los|las)?\s*([a-z0-9ñ\s\-\(\)]+?)(?=$|[.,;:!?\n])/i);
+  if (!m) return null;
+
+  let candidato = (m[2] || '').trim();
+  if (!candidato) return null;
+
+  // Limpiar espacios dobles
+  candidato = candidato.replace(/\s+/g, ' ').trim();
+
+  // Si viene muy largo, probablemente no es un distrito (evitar "en la encañada y luego...")
+  if (candidato.length > 40) return null;
+
+  // Evitar cosas demasiado genéricas
+  const descartes = new Set(['mi casa', 'casa', 'la calle', 'mi barrio', 'el barrio', 'la ciudad']);
+  if (descartes.has(candidato)) return null;
+
+  // Reponer mayúsculas tipo título solo para guardar más bonito (resolverFiscalia normaliza igual)
+  // "la encanada" -> "la encanada" (no hace falta perfecto)
+  return candidato;
+}
+
 // ---------------------------
 // Clasificador IA
 // ---------------------------
@@ -130,7 +156,8 @@ async function responderIA(session, texto) {
   // 0) Saludos en INICIO: no intentar derivación
   if (session.estado === 'INICIO' && esSaludo(texto)) {
     return {
-      respuestaTexto: 'Hola 👋 Puedes elegir una opción del menú. Si deseas denunciar, escribe **Denuncia** o cuéntame brevemente qué ocurrió.',
+      respuestaTexto:
+        'Hola 👋 Puedes elegir una opción del menú. Si deseas denunciar, escribe **Denuncia** o cuéntame brevemente qué ocurrió.',
       session
     };
   }
@@ -145,7 +172,8 @@ async function responderIA(session, texto) {
       vinculoRespuesta: null
     };
     return {
-      respuestaTexto: 'Perfecto. Cuéntame, por favor, ¿qué ocurrió? Puedes describir los hechos con tus palabras.',
+      respuestaTexto:
+        'Perfecto. Cuéntame, por favor, ¿qué ocurrió? Puedes describir los hechos con tus palabras.',
       session
     };
   }
@@ -157,7 +185,8 @@ async function responderIA(session, texto) {
       session.contexto.materiaDetectada = 'familia';
       session.estado = 'ESPERANDO_DISTRITO';
       return {
-        respuestaTexto: 'Entiendo. Para orientarle correctamente, indíqueme en qué distrito ocurrieron los hechos.',
+        respuestaTexto:
+          'Entiendo. Para orientarle correctamente, indíqueme en qué distrito ocurrieron los hechos.',
         session
       };
     }
@@ -168,13 +197,15 @@ async function responderIA(session, texto) {
     // Guardar contexto
     session.contexto.delitoEspecifico = clasif.delito_especifico || null;
     session.contexto.materiaDetectada = clasif.materia || null;
-    session.contexto.distritoTexto = clasif.distrito || null;
 
-    // Si claramente es consulta y no denuncia, responder de forma neutra (por ahora)
-    // (Luego lo conectamos a FAQ/Trámites/Ubicación)
+    // ✅ Si la IA no encontró distrito, intentamos extraerlo del texto
+    session.contexto.distritoTexto = clasif.distrito || extraerDistritoDesdeTexto(texto) || null;
+
+    // Si claramente es consulta y no denuncia, responder neutro (por ahora)
     if (clasif.tipo === 'consulta' && session.estado === 'INICIO') {
       return {
-        respuestaTexto: 'Puedo orientarte mejor si eliges una opción del menú (Ubicación, Preguntas, Trámites, Contactos) o si indicas que deseas presentar una **Denuncia**.',
+        respuestaTexto:
+          'Puedo orientarte mejor si eliges una opción del menú (Ubicación, Preguntas, Trámites, Contactos) o si indicas que deseas presentar una **Denuncia**.',
         session
       };
     }
@@ -195,7 +226,6 @@ async function responderIA(session, texto) {
 
     session.contexto.vinculoRespuesta = resp;
     session.estado = 'DERIVACION';
-    // Continuar a derivación en este mismo flujo
   }
 
   // 3) Distrito (si se está esperando)
@@ -203,11 +233,15 @@ async function responderIA(session, texto) {
     // Capturar distrito SOLO aquí (evita que "hola" sea distrito)
     session.contexto.distritoTexto = texto;
     session.estado = 'DERIVACION';
-    // Continuar a derivación
   }
 
   // 4) Derivación
   if (session.estado === 'DERIVACION') {
+    // ✅ Fix adicional: si aún no hay distrito, intentar extraerlo del texto actual
+    if (!session.contexto.distritoTexto) {
+      session.contexto.distritoTexto = extraerDistritoDesdeTexto(texto) || null;
+    }
+
     const res = resolverFiscalia(session.contexto);
 
     if (res.status === 'ASK_VINCULO') {
@@ -221,22 +255,21 @@ async function responderIA(session, texto) {
     }
 
     if (res.status === 'OK') {
-      // Mantener el contexto por si el ciudadano quiere seguir preguntando dentro de la misma denuncia
       session.estado = 'FINAL';
       return { respuestaTexto: res.mensaje, session };
     }
 
-    // Si no se pudo derivar, pedimos más detalle sin resetear la sesión
+    // Si no se pudo derivar, pedimos más detalle sin resetear todo
     session.estado = 'ESPERANDO_RELATO';
     return {
-      respuestaTexto: 'No pude determinar la fiscalía competente con esa información. ¿Podría describir nuevamente el caso e indicar el distrito si lo conoce?',
+      respuestaTexto:
+        'No pude determinar la fiscalía competente con esa información. ¿Podría describir nuevamente el caso e indicar el distrito si lo conoce?',
       session
     };
   }
 
   // 5) Estado FINAL: permitir que el ciudadano continúe sin reiniciar
   if (session.estado === 'FINAL') {
-    // Si escribe "denuncia" de nuevo, reiniciamos el flujo de denuncia
     if (esInicioDenuncia(texto)) {
       session.estado = 'ESPERANDO_RELATO';
       session.contexto = {
@@ -251,9 +284,9 @@ async function responderIA(session, texto) {
       };
     }
 
-    // Respuesta por defecto
     return {
-      respuestaTexto: '¿Deseas agregar algún detalle adicional del caso (por ejemplo, fecha, lugar o si conoces a la persona involucrada)?',
+      respuestaTexto:
+        '¿Deseas agregar algún detalle adicional del caso (por ejemplo, fecha, lugar o si conoces a la persona involucrada)?',
       session
     };
   }

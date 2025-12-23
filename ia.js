@@ -44,9 +44,34 @@ function esSaludo(texto) {
   return saludos.has(t);
 }
 
+// ✅ Mejorado: tolera errores de tipeo y variantes
 function esInicioDenuncia(texto) {
   const t = normalize(texto);
-  return t === 'denuncia' || t === 'hacer una denuncia' || t === 'quiero denunciar';
+
+  // Coincidencias directas
+  if (
+    t === 'denuncia' ||
+    t === 'denunciar' ||
+    t === 'hacer una denuncia' ||
+    t === 'quiero denunciar' ||
+    t === 'quiero hacer una denuncia'
+  ) return true;
+
+  // Tolerancia por inclusión (cubre "denncia", "denunica", "denuncai", etc.)
+  if (t.includes('denunc') || t.startsWith('denun')) return true;
+
+  // Casos típicos de error corto
+  const comunes = new Set([
+    'denncia',
+    'denunica',
+    'denucia',
+    'denunsia',
+    'denuncia.',
+    'denuncia!'
+  ]);
+  if (comunes.has(t)) return true;
+
+  return false;
 }
 
 function pareceCasoFamilia(texto) {
@@ -151,17 +176,8 @@ async function responderIA(session, texto) {
     };
   }
 
-  // 0) Saludos en INICIO: no intentar derivación
-  if (session.estado === 'INICIO' && esSaludo(texto)) {
-    return {
-      respuestaTexto:
-        'Hola 👋 Puedes elegir una opción del menú. Si deseas denunciar, escribe **Denuncia** o cuéntame brevemente qué ocurrió.',
-      session
-    };
-  }
-
-  // 0.1) Si el usuario escribe "Denuncia" (sin usar botón)
-  if (session.estado === 'INICIO' && esInicioDenuncia(texto)) {
+  // ✅ Regla fuerte: cualquier "denuncia" (incluso con typo) reinicia el flujo completo
+  if (esInicioDenuncia(texto)) {
     session.estado = 'ESPERANDO_RELATO';
     session.contexto = {
       distritoTexto: null,
@@ -172,6 +188,15 @@ async function responderIA(session, texto) {
     return {
       respuestaTexto:
         'Perfecto. Cuéntame, por favor, ¿qué ocurrió? Puedes describir los hechos con tus palabras.',
+      session
+    };
+  }
+
+  // Saludos en INICIO: no intentar derivación
+  if (session.estado === 'INICIO' && esSaludo(texto)) {
+    return {
+      respuestaTexto:
+        'Hola 👋 Puedes elegir una opción del menú. Si deseas denunciar, escribe **Denuncia** o cuéntame brevemente qué ocurrió.',
       session
     };
   }
@@ -192,14 +217,14 @@ async function responderIA(session, texto) {
 
     session.contexto.delitoEspecifico = clasif.delito_especifico || null;
 
-    // ✅ Default Penal si es denuncia y la IA no define materia
+    // Default Penal si es denuncia y la IA no define materia
     if (!clasif.materia && (clasif.tipo === 'denuncia' || textoSugiereDenunciaPenal(texto))) {
       session.contexto.materiaDetectada = 'Penal';
     } else {
       session.contexto.materiaDetectada = clasif.materia || null;
     }
 
-    // ✅ Extraer distrito si la IA no lo detectó
+    // Extraer distrito si la IA no lo detectó
     session.contexto.distritoTexto = clasif.distrito || extraerDistritoDesdeTexto(texto) || null;
 
     if (clasif.tipo === 'consulta' && session.estado === 'INICIO') {
@@ -264,26 +289,10 @@ async function responderIA(session, texto) {
     };
   }
 
-  // 5) FINAL (✅ anti-loop: cerrar y dar opciones)
+  // 5) FINAL (anti-loop)
   if (session.estado === 'FINAL') {
     const t = normalize(texto);
 
-    // Reiniciar si quiere denunciar otra vez
-    if (esInicioDenuncia(texto)) {
-      session.estado = 'ESPERANDO_RELATO';
-      session.contexto = {
-        distritoTexto: null,
-        delitoEspecifico: null,
-        materiaDetectada: null,
-        vinculoRespuesta: null
-      };
-      return {
-        respuestaTexto: 'De acuerdo. Cuéntame, por favor, ¿qué ocurrió?',
-        session
-      };
-    }
-
-    // Comandos simples
     if (t === 'otra consulta' || t === 'menu' || t === 'menú') {
       session.estado = 'INICIO';
       session.contexto = null;
@@ -296,12 +305,11 @@ async function responderIA(session, texto) {
     if (t === 'documentos' || t === 'que documentos' || t === 'qué documentos') {
       return {
         respuestaTexto:
-          'De forma general, se recomienda llevar: DNI (si lo tiene), una descripción clara de los hechos, datos de testigos (si existen) y cualquier evidencia disponible (fotos, mensajes, capturas, documentos). Si hay lesiones, un certificado o constancia médica puede ayudar.\n\nSi deseas, dime el distrito y el tipo de caso para orientarte mejor.',
+          'De forma general, se recomienda llevar: DNI (si lo tiene), una descripción clara de los hechos, datos de testigos (si existen) y cualquier evidencia disponible (fotos, mensajes, capturas, documentos). Si hay lesiones, un certificado o constancia médica puede ayudar.\n\nSi deseas, puedo orientarte mejor si me indicas el distrito y el tipo de caso.',
         session
       };
     }
 
-    // Cierre por defecto (sin loop)
     return {
       respuestaTexto:
         'La orientación principal ya fue brindada.\n\n' +

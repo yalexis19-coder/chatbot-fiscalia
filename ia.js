@@ -48,7 +48,6 @@ function esSaludo(texto) {
 function esInicioDenuncia(texto) {
   const t = normalize(texto);
 
-  // Coincidencias directas
   if (
     t === 'denuncia' ||
     t === 'denunciar' ||
@@ -57,10 +56,9 @@ function esInicioDenuncia(texto) {
     t === 'quiero hacer una denuncia'
   ) return true;
 
-  // Tolerancia por inclusión (cubre "denncia", "denunica", "denuncai", etc.)
+  // Cubre "denncia", "denunica", "denuncai", etc.
   if (t.includes('denunc') || t.startsWith('denun')) return true;
 
-  // Casos típicos de error corto
   const comunes = new Set([
     'denncia',
     'denunica',
@@ -172,18 +170,22 @@ async function responderIA(session, texto) {
       distritoTexto: null,
       delitoEspecifico: null,
       materiaDetectada: null,
-      vinculoRespuesta: null
+      vinculoRespuesta: null,
+      finalTurns: 0 // ✅ para evitar loop y a la vez reconocer detalles 1 vez
     };
+  } else if (typeof session.contexto.finalTurns !== 'number') {
+    session.contexto.finalTurns = 0;
   }
 
-  // ✅ Regla fuerte: cualquier "denuncia" (incluso con typo) reinicia el flujo completo
+  // ✅ Regla fuerte: "denuncia" (incluso con typo) reinicia el flujo completo desde cualquier estado
   if (esInicioDenuncia(texto)) {
     session.estado = 'ESPERANDO_RELATO';
     session.contexto = {
       distritoTexto: null,
       delitoEspecifico: null,
       materiaDetectada: null,
-      vinculoRespuesta: null
+      vinculoRespuesta: null,
+      finalTurns: 0
     };
     return {
       respuestaTexto:
@@ -226,6 +228,9 @@ async function responderIA(session, texto) {
 
     // Extraer distrito si la IA no lo detectó
     session.contexto.distritoTexto = clasif.distrito || extraerDistritoDesdeTexto(texto) || null;
+
+    // Reset de finalTurns al entrar a un caso nuevo
+    session.contexto.finalTurns = 0;
 
     if (clasif.tipo === 'consulta' && session.estado === 'INICIO') {
       return {
@@ -289,10 +294,11 @@ async function responderIA(session, texto) {
     };
   }
 
-  // 5) FINAL (anti-loop)
+  // 5) FINAL (anti-loop + reconoce 1 vez detalles adicionales)
   if (session.estado === 'FINAL') {
     const t = normalize(texto);
 
+    // Comandos simples
     if (t === 'otra consulta' || t === 'menu' || t === 'menú') {
       session.estado = 'INICIO';
       session.contexto = null;
@@ -310,6 +316,21 @@ async function responderIA(session, texto) {
       };
     }
 
+    // ✅ Reconocer 1 vez un detalle adicional (sin loop)
+    if (session.contexto && session.contexto.finalTurns < 1) {
+      session.contexto.finalTurns += 1;
+
+      return {
+        respuestaTexto:
+          'Gracias por el detalle. Con esa información, la orientación se mantiene.\n\n' +
+          'Si deseas, puedo ayudarte con lo siguiente:\n' +
+          '1️⃣ Escribir **Documentos** para saber qué llevar.\n' +
+          '2️⃣ Escribir **Otra consulta** para iniciar un nuevo caso.',
+        session
+      };
+    }
+
+    // Cierre por defecto (sin loop)
     return {
       respuestaTexto:
         'La orientación principal ya fue brindada.\n\n' +

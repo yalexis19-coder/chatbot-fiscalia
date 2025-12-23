@@ -1,5 +1,6 @@
 // derivacion.js
-// Motor de derivación (Función 1): relato/delito + distrito (+ vínculo si aplica) => fiscalía competente + datos
+// Motor de derivación (Función 1): relato/delito + distrito (+ vínculo si aplica)
+// => fiscalía competente + datos
 
 const knowledge = require('./knowledge.json');
 
@@ -35,7 +36,6 @@ function materiaCanonica(m) {
   };
   if (exact[t]) return exact[t];
 
-  // tolerancia
   if (t.includes('ambient')) return 'Materia Ambiental';
   if (t.includes('corrup')) return 'Corrupción';
   if (t.includes('extinc')) return 'Extinción de Dominio';
@@ -53,12 +53,12 @@ function findDistritoRecord(distritos, distritoTexto) {
   const d = normalize(distritoTexto);
   if (!d) return null;
 
-  // 1) exacto
   let rec = distritos.find((x) => normalize(x.distrito) === d);
   if (rec) return rec;
 
-  // 2) contiene / variante
-  rec = distritos.find((x) => normalize(x.distrito).includes(d) || d.includes(normalize(x.distrito)));
+  rec = distritos.find(
+    (x) => normalize(x.distrito).includes(d) || d.includes(normalize(x.distrito))
+  );
   return rec || null;
 }
 
@@ -132,78 +132,109 @@ function resolverFiscalia(contexto) {
   // 1) Materia base (desde IA)
   let materia = materiaCanonica(contexto?.materiaDetectada);
 
-  // 2) Si viene delito específico, afinamos materia + vínculo
+  // 2) Afinar por Competencias (si hay delito específico)
   const comp = findCompetenciaByEspecifico(competencias, contexto?.delitoEspecifico);
 
-  let requiereVinculo = null; // 'SI' | 'NO' | 'DEPENDE' | ''
+  let requiereVinculo = null; // SI | NO | DEPENDE
   let categoriaSiFamiliar = null;
 
   if (comp) {
     if (!materia) materia = materiaCanonica(comp.categoria);
-    requiereVinculo = (comp.requiere_vinculo_familiar || '').toString().trim().toUpperCase();
+    requiereVinculo = (comp.requiere_vinculo_familiar || '').toUpperCase();
     categoriaSiFamiliar = comp.categoria_si_familiar || null;
   }
 
   if (!materia) {
     return {
       status: 'ASK_CLARIFY',
-      mensaje: 'Para orientarle correctamente, por favor cuénteme brevemente qué ocurrió (o indique el tipo de caso: Penal, violencia, familia, etc.).'
+      mensaje:
+        'Para orientarle correctamente, por favor cuénteme brevemente qué ocurrió (o indique el tipo de caso: Penal, violencia, familia, etc.).'
     };
   }
 
-  // 3) Vínculo familiar (solo si DEPENDE)
-  if (requiereVinculo === 'DEPENDE') {
-    const v = (contexto?.vinculoRespuesta || '').toString().trim().toUpperCase();
-    if (v !== 'SI' && v !== 'NO') {
-      return {
-        status: 'ASK_VINCULO',
-        mensaje: '¿La persona denunciada es su pareja, expareja o un familiar cercano? Responda solo **sí** o **no**.'
-      };
+  // 3) Lógica de vínculo (núcleo del ajuste)
+  const v = (contexto?.vinculoRespuesta || '').toUpperCase();
+
+  // Familia civil: NO preguntar vínculo
+  if (materia === 'familia') {
+    // no se toca
+  } else {
+    // Violencia especializada
+    if (materia === 'violencia') {
+      if (v !== 'SI' && v !== 'NO') {
+        return {
+          status: 'ASK_VINCULO',
+          mensaje:
+            'Para orientarle mejor: ¿la persona denunciada es su pareja, expareja o un familiar cercano? Responda solo **sí** o **no**.'
+        };
+      }
+      if (v === 'NO') {
+        materia = 'Penal';
+      }
     }
 
-    if (v === 'SI' && categoriaSiFamiliar) {
-      const m2 = materiaCanonica(categoriaSiFamiliar);
-      if (m2) materia = m2;
+    // Penal con regla de vínculo según Competencias
+    if (materia === 'Penal' && (requiereVinculo === 'SI' || requiereVinculo === 'DEPENDE')) {
+      if (v !== 'SI' && v !== 'NO') {
+        return {
+          status: 'ASK_VINCULO',
+          mensaje:
+            'Para orientarle mejor: ¿la persona denunciada es su pareja, expareja o un familiar cercano? Responda solo **sí** o **no**.'
+        };
+      }
+      if (v === 'SI' && categoriaSiFamiliar) {
+        const m2 = materiaCanonica(categoriaSiFamiliar);
+        if (m2) materia = m2;
+      }
     }
   }
 
   // 4) Distrito
   const distritoTexto = contexto?.distritoTexto;
   if (!distritoTexto || normalize(distritoTexto) === '') {
-    return { status: 'ASK_DISTRITO', mensaje: 'Indíqueme por favor **en qué distrito** ocurrieron los hechos.' };
+    return {
+      status: 'ASK_DISTRITO',
+      mensaje: 'Indíqueme por favor **en qué distrito** ocurrieron los hechos.'
+    };
   }
 
   const distritoRec = findDistritoRecord(distritos, distritoTexto);
   const distritoFinal = distritoRec?.distrito || distritoTexto;
 
-  // 5) Priorización (ReglasCompetencia)
-  //    Prioridad A: Materia + Alcance=District + distrito exacto
-  //    Prioridad B: Materia + Alcance=Distrito Fiscal y distrito vacío
+  // 5) Priorización por ReglasCompetencia
   let regla = findReglaDistrito(reglas, materia, distritoFinal);
   if (!regla) regla = findReglaDistritoFiscal(reglas, materia);
 
   let codigoFiscalia = regla?.fiscalia_destino_codigo || null;
   let observacion = regla?.observacion_opcional || '';
 
-  // 6) Fallback por hoja Distritos (si no hay regla)
+  // 6) Fallback por Distritos
   if (!codigoFiscalia && distritoRec) {
     const m = normalize(materia);
 
     if (m === normalize('violencia')) {
       const tiene = normalize(distritoRec.tiene_fiscalia_violencia) === 'si';
-      if (tiene && distritoRec.fiscalia_violencia_codigo) codigoFiscalia = distritoRec.fiscalia_violencia_codigo;
-      else if (distritoRec.fiscalia_penal_mixta_codigo) codigoFiscalia = distritoRec.fiscalia_penal_mixta_codigo;
+      if (tiene && distritoRec.fiscalia_violencia_codigo)
+        codigoFiscalia = distritoRec.fiscalia_violencia_codigo;
+      else if (distritoRec.fiscalia_penal_mixta_codigo)
+        codigoFiscalia = distritoRec.fiscalia_penal_mixta_codigo;
     } else if (m === normalize('penal')) {
-      if (distritoRec.fiscalia_penal_mixta_codigo) codigoFiscalia = distritoRec.fiscalia_penal_mixta_codigo;
+      if (distritoRec.fiscalia_penal_mixta_codigo)
+        codigoFiscalia = distritoRec.fiscalia_penal_mixta_codigo;
     } else if (m === normalize('familia')) {
-      if (distritoRec.fiscalia_familia_codigo) codigoFiscalia = distritoRec.fiscalia_familia_codigo;
-      else if (distritoRec.fiscalia_penal_mixta_codigo) codigoFiscalia = distritoRec.fiscalia_penal_mixta_codigo;
+      if (distritoRec.fiscalia_familia_codigo)
+        codigoFiscalia = distritoRec.fiscalia_familia_codigo;
+      else if (distritoRec.fiscalia_penal_mixta_codigo)
+        codigoFiscalia = distritoRec.fiscalia_penal_mixta_codigo;
     } else if (m === normalize('prevencion')) {
-      if (distritoRec.fiscalia_prevencion_codigo) codigoFiscalia = distritoRec.fiscalia_prevencion_codigo;
+      if (distritoRec.fiscalia_prevencion_codigo)
+        codigoFiscalia = distritoRec.fiscalia_prevencion_codigo;
     }
   }
 
-  const fiscalia = codigoFiscalia ? findFiscaliaByCodigo(fiscalias, codigoFiscalia) : null;
+  const fiscalia = codigoFiscalia
+    ? findFiscaliaByCodigo(fiscalias, codigoFiscalia)
+    : null;
 
   if (!codigoFiscalia || !fiscalia) {
     return {
@@ -217,7 +248,12 @@ function resolverFiscalia(contexto) {
     status: 'OK',
     codigoFiscalia,
     fiscalia,
-    mensaje: formatearRespuestaFiscalia({ fiscalia, observacion, materia, distrito: distritoFinal })
+    mensaje: formatearRespuestaFiscalia({
+      fiscalia,
+      observacion,
+      materia,
+      distrito: distritoFinal
+    })
   };
 }
 

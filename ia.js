@@ -96,8 +96,6 @@ function sugiereAgresorDesconocido(texto) {
   ].some(k => t.includes(normalize(k)));
 }
 
-
-
 function esComandoMenu(texto) {
   const t = normalize(texto);
   return t === 'menu' || t === 'menú' || t === 'inicio';
@@ -145,7 +143,10 @@ function inferirPorCompetencias(texto, competencias) {
   const tNorm = normalize(texto);
   if (!tNorm) return null;
 
-  // 1) ESPECIFICO
+  const tokensMsg = tokensUtiles(texto);
+  if (tokensMsg.length < 3) return null;
+
+  // 1) Match directo por ESPECIFICO (si el ciudadano lo escribe tal cual)
   let bestEsp = null;
   for (const c of competencias) {
     const esp = normalize(c.especifico);
@@ -154,32 +155,35 @@ function inferirPorCompetencias(texto, competencias) {
       if (!bestEsp || esp.length > bestEsp.espLen) bestEsp = { row: c, espLen: esp.length };
     }
   }
-  if (bestEsp) return { materia: bestEsp.row.categoria || null, delitoEspecifico: bestEsp.row.especifico || null };
+  if (bestEsp) {
+    return { materia: bestEsp.row.categoria || null, delitoEspecifico: bestEsp.row.especifico || null };
+  }
 
-  // 2) DESCRIPCION
-  const tokensMsg = tokensUtiles(texto);
-  if (tokensMsg.length < 5) return null;
-
+  // 2) Scoring por overlap usando: ESPECIFICO + SUBGENERICO + GENERICO + DESCRIPCION
   let best = null;
   for (const c of competencias) {
-    const desc = normalize(c.descripcion);
-    if (!desc || desc.length < 25) continue;
+    const blob = [c.especifico, c.subgenerico, c.generico, c.descripcion].filter(Boolean).join(' | ');
+    const blobNorm = normalize(blob);
+    if (!blobNorm || blobNorm.length < 15) continue;
 
-    const tokensDesc = tokensUtiles(desc);
-    if (tokensDesc.length < 8) continue;
+    const tokensBlob = tokensUtiles(blobNorm);
+    if (tokensBlob.length < 6) continue;
 
-    const setDesc = new Set(tokensDesc);
+    const setBlob = new Set(tokensBlob);
     let hit = 0;
-    for (const w of tokensMsg) if (setDesc.has(w)) hit++;
+    for (const w of tokensMsg) if (setBlob.has(w)) hit++;
 
-    const ratio = hit / Math.min(tokensMsg.length, 12);
-    if (hit >= 4 && ratio >= 0.35) {
+    const denom = Math.min(tokensMsg.length, 12);
+    const ratio = denom ? (hit / denom) : 0;
+
+    if (hit >= 4 && ratio >= 0.28) {
       const score = hit * 10 + Math.round(ratio * 100);
       if (!best || score > best.score) best = { row: c, score };
     }
   }
+
   if (!best) return null;
-  if (best.score < 55) return null;
+  if (best.score < 50) return null;
 
   return { materia: best.row.categoria || null, delitoEspecifico: best.row.especifico || null };
 }
@@ -385,29 +389,30 @@ async function responderIA(session, texto) {
     } else {
       const clasif = await clasificarMensaje(texto);
 
-      // 1) Inferencia institucional por Competencias (manda si matchea)
-      const inferido = inferirPorCompetencias(texto, knowledge.competencias);
-      if (inferido?.materia) {
-        session.contexto.materiaDetectada = inferido.materia;
-        session.contexto.delitoEspecifico = inferido.delitoEspecifico || null;
-      } else {
-        session.contexto.delitoEspecifico = clasif.delito_especifico || null;
+// 1) Inferencia institucional por Competencias (data-driven)
+const inferido = inferirPorCompetencias(texto, knowledge.competencias);
+if (inferido?.materia) {
+  session.contexto.materiaDetectada = inferido.materia;
+  session.contexto.delitoEspecifico = inferido.delitoEspecifico || null;
+} else {
+  // 2) Fallback IA: útil cuando no calza con Competencias
+  session.contexto.delitoEspecifico = clasif.delito_especifico || null;
 
-        // Agresor desconocido -> evitar ASK_VINCULO, ir a Penal
-        if (sugiereAgresorDesconocido(texto) || sugiereAgresorNoFamiliar(texto)) {
-          session.contexto.vinculoRespuesta = 'NO';
-          session.contexto.materiaDetectada = 'Penal';
-        } else {
-          // default Penal si es denuncia y la IA no define materia
-          if (!clasif.materia && (clasif.tipo === 'denuncia' || textoSugiereDenunciaPenal(texto))) {
-            session.contexto.materiaDetectada = 'Penal';
-          } else {
-            session.contexto.materiaDetectada = clasif.materia || null;
-          }
-        }
-      }
+  // Agresor no familiar (vecino/desconocido) -> Penal por defecto
+  if (sugiereAgresorDesconocido(texto) || sugiereAgresorNoFamiliar(texto)) {
+    session.contexto.vinculoRespuesta = 'NO';
+    session.contexto.materiaDetectada = 'Penal';
+  } else {
+    // Si no define materia, asumir Penal genérico (la decisión de vínculo queda en derivacion.js según knowledge.json)
+    if (!clasif.materia && (clasif.tipo === 'denuncia' || textoSugiereDenunciaPenal(texto))) {
+      session.contexto.materiaDetectada = 'Penal';
+    } else {
+      session.contexto.materiaDetectada = clasif.materia || 'Penal';
+    }
+  }
+}
 
-      session.contexto.distritoTexto = clasif.distrito || null;
+session.contexto.distritoTexto = clasif.distrito || null;
 
       if (!session.contexto.materiaDetectada) {
         session.estado = 'INICIO';
@@ -480,21 +485,10 @@ async function responderIA(session, texto) {
     if (!resp) return { respuestaTexto: 'Por favor responda solo "sí" o "no".', session };
 
     session.contexto.vinculoRespuesta = resp;
-
-    // Si todavía no tenemos distrito, pedirlo
-    if (!session.contexto.distritoTexto) {
-      session.estado = 'ESPERANDO_DISTRITO';
-      return {
-        respuestaTexto:
-          'Gracias. Ahora indíqueme en qué distrito ocurrieron los hechos.',
-        session
-      };
-    }
-
     session.estado = 'DERIVACION';
+
     // volver a derivar sin usar "sí/no" como distrito
     return responderIA(session, session.contexto.distritoTexto || '');
-
   }
 
   return {

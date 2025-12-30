@@ -39,6 +39,14 @@ function findDistritoRecord(distritos, distritoTexto) {
   return distritos.find(x => normalize(x.distrito) === d) || null;
 }
 
+function tieneFiscaliaViolencia(distritoRec) {
+  if (!distritoRec) return false;
+  const tv = normalize(distritoRec.tiene_fiscalia_violencia);
+  if (tv === 'si' || tv === 'sí' || tv === 'true' || tv === '1') return true;
+  const cod = normalize(distritoRec.fiscalia_violencia_codigo);
+  return cod !== '';
+}
+
 function resolverAliasDistrito(aliasDistritos, texto) {
   const t = normalize(texto);
   if (!t) return null;
@@ -156,13 +164,22 @@ function resolverFiscalia(contexto) {
   const categoriaSiFamiliar =
     comp?.['Categoria_si_familiar'] ?? comp?.categoria_si_familiar ?? comp?.categoriaSiFamiliar ?? null;
 
-  // Si la competencia indica que requiere vínculo o depende, pedirlo si no se tiene aún
-  if ((requiere === 'SI' || requiere === 'DEPENDE') && !vinculoRespuesta) {
+  // Si la competencia indica que requiere vínculo o depende, pedirlo SOLO si el distrito cuenta con fiscalía de violencia.
+  // Si NO existe fiscalía de violencia en ese distrito, no vale la pena preguntar: se deriva como Penal/Mixta.
+  if ((requiere === 'SI' || requiere === 'DEPENDE') && !vinculoRespuesta && tieneFiscaliaViolencia(distritoRec)) {
     return {
       status: 'ASK_VINCULO',
       mensaje:
         'Para orientarle mejor: ¿la persona denunciada es su pareja, expareja o un familiar cercano? Responda solo “sí” o “no”.'
     };
+  }
+
+  // Si requería vínculo (SI/DEPENDE) pero el distrito NO tiene fiscalía de violencia, no preguntamos vínculo.
+  // En ese escenario se atiende como Penal/Mixta (evita loops y preguntas innecesarias).
+  if ((requiere === 'SI' || requiere === 'DEPENDE') && !vinculoRespuesta && !tieneFiscaliaViolencia(distritoRec)) {
+    if (normalize(materia) === 'violencia') {
+      materia = 'Penal';
+    }
   }
 
   // Si depende, ajustar materia según respuesta

@@ -96,6 +96,8 @@ function sugiereAgresorDesconocido(texto) {
   ].some(k => t.includes(normalize(k)));
 }
 
+
+
 function esComandoMenu(texto) {
   const t = normalize(texto);
   return t === 'menu' || t === 'menú' || t === 'inicio';
@@ -478,10 +480,21 @@ async function responderIA(session, texto) {
     if (!resp) return { respuestaTexto: 'Por favor responda solo "sí" o "no".', session };
 
     session.contexto.vinculoRespuesta = resp;
-    session.estado = 'DERIVACION';
 
+    // Si todavía no tenemos distrito, pedirlo
+    if (!session.contexto.distritoTexto) {
+      session.estado = 'ESPERANDO_DISTRITO';
+      return {
+        respuestaTexto:
+          'Gracias. Ahora indíqueme en qué distrito ocurrieron los hechos.',
+        session
+      };
+    }
+
+    session.estado = 'DERIVACION';
     // volver a derivar sin usar "sí/no" como distrito
     return responderIA(session, session.contexto.distritoTexto || '');
+
   }
 
   return {

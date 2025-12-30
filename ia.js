@@ -396,23 +396,41 @@ if (inferido?.materia) {
   session.contexto.delitoEspecifico = inferido.delitoEspecifico || null;
 } else {
   // 2) Fallback IA: útil cuando no calza con Competencias
-  session.contexto.delitoEspecifico = clasif.delito_especifico || null;
+session.contexto.delitoEspecifico = clasif.delito_especifico || null;
 
-  // Agresor no familiar (vecino/desconocido) -> Penal por defecto
-  if (sugiereAgresorDesconocido(texto) || sugiereAgresorNoFamiliar(texto)) {
-    session.contexto.vinculoRespuesta = 'NO';
-    session.contexto.materiaDetectada = 'Penal';
-  } else {
-    // Si no define materia, asumir Penal genérico (la decisión de vínculo queda en derivacion.js según knowledge.json)
-    if (!clasif.materia && (clasif.tipo === 'denuncia' || textoSugiereDenunciaPenal(texto))) {
-      session.contexto.materiaDetectada = 'Penal';
-    } else {
-      session.contexto.materiaDetectada = clasif.materia || 'Penal';
-    }
-  }
+// Agresor no familiar (vecino/desconocido) -> Penal por defecto
+if (sugiereAgresorDesconocido(texto) || sugiereAgresorNoFamiliar(texto)) {
+  session.contexto.vinculoRespuesta = 'NO';
+  session.contexto.materiaDetectada = 'Penal';
+} else {
+  // ✅ NO asumir Penal automáticamente.
+  // Si la IA detecta una materia (p.ej. Violencia, Familia, Prevencion, Ambiental, Corrupción, etc.), la usamos
+  // para derivar por ReglasCompetencia y cubrir todo el espectro.
+  session.contexto.materiaDetectada = clasif.materia || null;
 }
 
+
 session.contexto.distritoTexto = clasif.distrito || null;
+// ✅ Si no se pudo identificar materia ni por Competencias ni por IA, pedir al ciudadano que elija una materia.
+// (Evita asumir Penal y mantiene cobertura total).
+if (!session.contexto.materiaDetectada) {
+  session.estado = 'ESPERANDO_MATERIA';
+  return {
+    respuestaTexto:
+      'Para orientarle mejor, indique el tipo de caso (puede escribir una opción):\n' +
+      '1) Penal\n' +
+      '2) Violencia\n' +
+      '3) Familia\n' +
+      '4) Prevencion\n' +
+      '5) Materia Ambiental\n' +
+      '6) Corrupción\n' +
+      '7) Crimen Organizado\n' +
+      '8) Derechos Humanos\n' +
+      '9) Extinción de Dominio',
+    session
+  };
+}
+
 
       if (!session.contexto.materiaDetectada) {
         session.estado = 'INICIO';
@@ -480,6 +498,61 @@ session.contexto.distritoTexto = clasif.distrito || null;
   }
 
   // Vínculo
+// ---------------------------
+// Materia (cuando no se pudo inferir)
+// ---------------------------
+if (session.estado === 'ESPERANDO_MATERIA') {
+  const t = normalize(texto);
+  const map = {
+    '1': 'Penal',
+    'penal': 'Penal',
+    '2': 'Violencia',
+    'violencia': 'Violencia',
+    'violencia familiar': 'Violencia',
+    '3': 'Familia',
+    'familia': 'Familia',
+    '4': 'Prevencion',
+    'prevencion': 'Prevencion',
+    'prevención': 'Prevencion',
+    '5': 'Materia Ambiental',
+    'ambiental': 'Materia Ambiental',
+    'materia ambiental': 'Materia Ambiental',
+    '6': 'Corrupción',
+    'corrupcion': 'Corrupción',
+    'corrupción': 'Corrupción',
+    '7': 'Crimen Organizado',
+    'crimen organizado': 'Crimen Organizado',
+    '8': 'Derechos Humanos',
+    'derechos humanos': 'Derechos Humanos',
+    '9': 'Extinción de Dominio',
+    'extincion de dominio': 'Extinción de Dominio',
+    'extinción de dominio': 'Extinción de Dominio'
+  };
+
+  const materiaSel = map[t] || null;
+  if (!materiaSel) {
+    return {
+      respuestaTexto:
+        'Por favor, escriba una de estas opciones: Penal, Violencia, Familia, Prevencion, Materia Ambiental, Corrupción, Crimen Organizado, Derechos Humanos, Extinción de Dominio.',
+      session
+    };
+  }
+
+  session.contexto.materiaDetectada = materiaSel;
+
+  if (!session.contexto.distritoTexto) {
+    session.estado = 'ESPERANDO_DISTRITO';
+    return {
+      respuestaTexto:
+        'Gracias. Ahora indíqueme en qué distrito ocurrieron los hechos.',
+      session
+    };
+  }
+
+  session.estado = 'DERIVACION';
+  return responderIA(session, session.contexto.distritoTexto);
+}
+
   if (session.estado === 'ESPERANDO_VINCULO') {
     const resp = esRespuestaSiNo(texto);
     if (!resp) return { respuestaTexto: 'Por favor responda solo "sí" o "no".', session };

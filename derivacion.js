@@ -62,14 +62,6 @@ function findDistritoRecord(distritos, distritoTexto) {
   return rec || null;
 }
 
-function resolverAliasDistrito(aliasDistritos, distritoTexto) {
-  const t = normalize(distritoTexto);
-  if (!t) return null;
-  const hit = aliasDistritos.find(a => normalize(a.alias) === t);
-  return hit ? hit.distrito_destino : null;
-}
-
-
 function findFiscaliaByCodigo(fiscalias, codigo) {
   const c = normalize(codigo);
   return fiscalias.find((f) => normalize(f.codigo_fiscalia) === c) || null;
@@ -78,11 +70,13 @@ function findFiscaliaByCodigo(fiscalias, codigo) {
 function findReglaDistrito(reglas, materia, distrito) {
   const m = normalize(materia);
   const d = normalize(distrito);
+  // Soporte para variantes de alcance (por ejemplo: "Distrito" vs "distrito_" / "distrito" en el Excel)
+  const alcanceNorm = (val) => normalize(val).replace(/_/g, ' ');
   return (
     reglas.find(
       (r) =>
         normalize(r.materia) === m &&
-        normalize(r.alcance) === normalize('Distrito') &&
+        alcanceNorm(r.alcance) === 'distrito' &&
         normalize(r.distrito) === d
     ) || null
   );
@@ -90,11 +84,13 @@ function findReglaDistrito(reglas, materia, distrito) {
 
 function findReglaDistritoFiscal(reglas, materia) {
   const m = normalize(materia);
+  // Soporte para variantes de alcance: "Distrito Fiscal" vs "distrito_fiscal" en el Excel
+  const alcanceNorm = (val) => normalize(val).replace(/_/g, ' ');
   return (
     reglas.find(
       (r) =>
         normalize(r.materia) === m &&
-        normalize(r.alcance) === normalize('Distrito Fiscal') &&
+        alcanceNorm(r.alcance) === 'distrito fiscal' &&
         isBlank(r.distrito)
     ) || null
   );
@@ -136,7 +132,6 @@ function resolverFiscalia(contexto) {
   const reglas = Array.isArray(knowledge.reglasCompetencia) ? knowledge.reglasCompetencia : [];
   const distritos = Array.isArray(knowledge.distritos) ? knowledge.distritos : [];
   const fiscalias = Array.isArray(knowledge.fiscalias) ? knowledge.fiscalias : [];
-  const aliasDistritos = Array.isArray(knowledge.aliasDistritos) ? knowledge.aliasDistritos : [];
 
   // 1) Materia base (desde IA)
   let materia = materiaCanonica(contexto?.materiaDetectada);
@@ -182,12 +177,8 @@ function resolverFiscalia(contexto) {
     return { status: 'ASK_DISTRITO', mensaje: 'Indíqueme por favor **en qué distrito** ocurrieron los hechos.' };
   }
 
-  let distritoBuscado = distritoTexto;
-  const alias = resolverAliasDistrito(aliasDistritos, distritoTexto);
-  if (alias) distritoBuscado = alias;
-
-  const distritoRec = findDistritoRecord(distritos, distritoBuscado);
-  const distritoFinal = distritoRec?.distrito || distritoBuscado;
+  const distritoRec = findDistritoRecord(distritos, distritoTexto);
+  const distritoFinal = distritoRec?.distrito || distritoTexto;
 
   // 5) Priorización (ReglasCompetencia)
   //    Prioridad A: Materia + Alcance=District + distrito exacto
@@ -197,18 +188,6 @@ function resolverFiscalia(contexto) {
 
   let codigoFiscalia = regla?.fiscalia_destino_codigo || null;
   let observacion = regla?.observacion_opcional || '';
-
-  // ✅ Prioridad especial para FAMILIA: si el distrito tiene fiscalía de familia definida, usarla
-  if (normalize(materia) === normalize('familia') && distritoRec && distritoRec.fiscalia_familia_codigo) {
-    const famCode = distritoRec.fiscalia_familia_codigo;
-    if (normalize(codigoFiscalia) !== normalize(famCode)) {
-      codigoFiscalia = famCode;
-      // Mantener la observación si ya existe; si no, agregar una nota breve
-      if (isBlank(observacion)) {
-        observacion = 'Este distrito es atendido por la Fiscalía de Familia correspondiente.';
-      }
-    }
-  }
 
   // 6) Fallback por hoja Distritos (si no hay regla)
   if (!codigoFiscalia && distritoRec) {

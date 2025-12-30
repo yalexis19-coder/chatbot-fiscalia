@@ -353,14 +353,20 @@ async function responderIA(session, texto) {
   if (session.estado === 'ESPERANDO_RELATO') {
     const tRel = normalize(texto);
 
-    // ✅ Caso penal con menor agredido por NO familiar (ej. vecino)
+    // ✅ Caso penal con agresor NO familiar (ej. vecino/desconocido):
+    // Primero pedir el distrito (NO intentar derivar sin distrito).
     if (sugiereAgresorNoFamiliar(texto) && (tRel.includes('agred') || tRel.includes('golpe') || tRel.includes('lesion') || tRel.includes('lesión') || tRel.includes('amenaz'))) {
       session.contexto.vinculoRespuesta = 'NO';
       session.contexto.materiaDetectada = 'Penal';
       session.contexto.delitoEspecifico = null;
       session.contexto.distritoTexto = null;
-      session.estado = 'DERIVACION';
-      // continuar hacia derivación (no return)
+      session.estado = 'ESPERANDO_DISTRITO';
+
+      return {
+        respuestaTexto:
+          'Entiendo. Para orientarle correctamente, indíqueme en qué distrito ocurrieron los hechos.',
+        session
+      };
     } else if (pareceCasoFamilia(texto) && !sugiereAgresorNoFamiliar(texto)) {
       // Familia civil (visitas/alimentos/etc.)
       session.contexto.materiaDetectada = 'familia';

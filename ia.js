@@ -44,9 +44,7 @@ function levenshtein(a, b) {
 function esSaludo(texto) {
   const t = normalize(texto);
   if (!t) return false;
-  return [
-    'hola','buenas','buenos dias','buenas tardes','buenas noches','hey','ola','holi'
-  ].includes(t);
+  return ['hola','buenas','buenos dias','buenas tardes','buenas noches','hey','ola','holi'].includes(t);
 }
 
 function tokensUtiles(texto) {
@@ -67,12 +65,25 @@ function esRespuestaSiNo(texto) {
   return null;
 }
 
+// Familia CIVIL (visitas, alimentos, etc.). No usar "hijo/menor" como único indicador.
 function pareceCasoFamilia(texto) {
   const t = normalize(texto);
   return [
     'no me deja ver', 'me impide ver', 'regimen de visitas', 'régimen de visitas',
-    'tenencia', 'custodia', 'alimentos', 'pension', 'pensión', 'divorcio', 'separacion',
-    'separación', 'filiacion', 'filiación', 'reconocimiento', 'visitas', 'hijo', 'hija', 'menor'
+    'tenencia', 'custodia', 'alimentos', 'demanda de alimentos',
+    'pension', 'pensión', 'pension de alimentos', 'pensión de alimentos',
+    'divorcio', 'separacion', 'separación',
+    'filiacion', 'filiación', 'reconocimiento', 'visitas'
+  ].some(k => t.includes(normalize(k)));
+}
+
+// Indicadores de agresor NO familiar (evita violencia familiar/familia por defecto)
+function sugiereAgresorNoFamiliar(texto) {
+  const t = normalize(texto);
+  return [
+    'vecino','vecina','desconocido','desconocida','extraño','extrano','persona desconocida',
+    'un sujeto','un señor','una señora','no lo conozco','no la conozco','no conozco a la persona',
+    'compañero','companero','colega','profesor','docente','director','chofer','taxista','mototaxista'
   ].some(k => t.includes(normalize(k)));
 }
 
@@ -110,7 +121,11 @@ function esInicioDenuncia(texto) {
 
 function textoSugiereDenunciaPenal(texto) {
   const t = normalize(texto);
-  return ['robaron','robo','asalto','extorsion','extorsión','amenaza','amenazaron','golpearon','agredio','agredió','violacion','violación','matar','homicidio','secuestro','droga'].some(k => t.includes(normalize(k)));
+  return [
+    'robaron','robo','asalto','extorsion','extorsión','amenaza','amenazaron',
+    'golpearon','agredio','agredió','agredida','agredido','lesion','lesión',
+    'violacion','violación','matar','homicidio','secuestro','droga'
+  ].some(k => t.includes(normalize(k)));
 }
 
 function pareceRelato(texto) {
@@ -120,10 +135,11 @@ function pareceRelato(texto) {
 
 // ---------------------------
 // Inferencia por Competencias (data-driven)
+// 1) ESPECIFICO
+// 2) DESCRIPCION (scoring conservador)
 // ---------------------------
 function inferirPorCompetencias(texto, competencias) {
   if (!Array.isArray(competencias) || !texto) return null;
-
   const tNorm = normalize(texto);
   if (!tNorm) return null;
 
@@ -136,11 +152,9 @@ function inferirPorCompetencias(texto, competencias) {
       if (!bestEsp || esp.length > bestEsp.espLen) bestEsp = { row: c, espLen: esp.length };
     }
   }
-  if (bestEsp) {
-    return { materia: bestEsp.row.categoria || null, delitoEspecifico: bestEsp.row.especifico || null };
-  }
+  if (bestEsp) return { materia: bestEsp.row.categoria || null, delitoEspecifico: bestEsp.row.especifico || null };
 
-  // 2) DESCRIPCION (conservador)
+  // 2) DESCRIPCION
   const tokensMsg = tokensUtiles(texto);
   if (tokensMsg.length < 5) return null;
 
@@ -162,7 +176,6 @@ function inferirPorCompetencias(texto, competencias) {
       if (!best || score > best.score) best = { row: c, score };
     }
   }
-
   if (!best) return null;
   if (best.score < 55) return null;
 
@@ -215,7 +228,7 @@ async function responderIA(session, texto) {
   if (!session.estado) session.estado = 'INICIO';
   if (typeof session.finalTurns !== 'number') session.finalTurns = 0;
 
-  // Saludo: NO iniciar derivación
+  // Saludo
   if (esSaludo(texto) && (session.estado === 'INICIO' || session.estado === 'FINAL')) {
     session.estado = 'INICIO';
     return {
@@ -271,7 +284,7 @@ async function responderIA(session, texto) {
 
   // Cierre conversacional
   if (session.estado === 'FINAL') {
-    // ✅ Si el usuario escribe "Denuncia" (o parecido) en cierre, iniciar nuevo caso
+    // ✅ Si escribe "Denuncia" en cierre, iniciar nuevo caso
     if (esInicioDenuncia(texto)) {
       const textoLimpio = (texto || '').replace(/denuncia(r)?/ig, '').trim();
       session.estado = 'ESPERANDO_RELATO';
@@ -281,17 +294,16 @@ async function responderIA(session, texto) {
       session.contexto.materiaDetectada = null;
       session.contexto.vinculoRespuesta = null;
 
-      // Si ya venía con relato, usarlo directamente
       if (normalize(textoLimpio).length > 10) {
         return responderIA(session, textoLimpio);
       }
-
       return {
         respuestaTexto:
           'Perfecto. Cuéntame, por favor, ¿qué ocurrió? Puedes describir los hechos con tus palabras.',
         session
       };
     }
+
     session.finalTurns += 1;
     if (session.finalTurns === 1) {
       return {
@@ -307,7 +319,7 @@ async function responderIA(session, texto) {
     return { respuestaTexto: 'Para continuar, escriba *Menú* o *Denuncia*.', session };
   }
 
-  // Estado INICIO: SOLO pasar a relato si corresponde
+  // Estado INICIO
   if (session.estado === 'INICIO') {
     if (esInicioDenuncia(texto)) {
       const textoLimpio = (texto || '').replace(/denuncia(r)?/ig, '').trim();
@@ -339,7 +351,18 @@ async function responderIA(session, texto) {
 
   // Relato
   if (session.estado === 'ESPERANDO_RELATO') {
-    if (pareceCasoFamilia(texto)) {
+    const tRel = normalize(texto);
+
+    // ✅ Caso penal con menor agredido por NO familiar (ej. vecino)
+    if (sugiereAgresorNoFamiliar(texto) && (tRel.includes('agred') || tRel.includes('golpe') || tRel.includes('lesion') || tRel.includes('lesión') || tRel.includes('amenaz'))) {
+      session.contexto.vinculoRespuesta = 'NO';
+      session.contexto.materiaDetectada = 'Penal';
+      session.contexto.delitoEspecifico = null;
+      session.contexto.distritoTexto = null;
+      session.estado = 'DERIVACION';
+      // continuar hacia derivación (no return)
+    } else if (pareceCasoFamilia(texto) && !sugiereAgresorNoFamiliar(texto)) {
+      // Familia civil (visitas/alimentos/etc.)
       session.contexto.materiaDetectada = 'familia';
       session.contexto.delitoEspecifico = null;
       session.contexto.distritoTexto = null;
@@ -351,42 +374,44 @@ async function responderIA(session, texto) {
           'Entiendo. Para orientarle correctamente, indíqueme en qué distrito ocurrieron los hechos.',
         session
       };
-    }
-
-    const clasif = await clasificarMensaje(texto);
-
-    const inferido = inferirPorCompetencias(texto, knowledge.competencias);
-    if (inferido?.materia) {
-      session.contexto.materiaDetectada = inferido.materia;
-      session.contexto.delitoEspecifico = inferido.delitoEspecifico || null;
     } else {
-      session.contexto.delitoEspecifico = clasif.delito_especifico || null;
+      const clasif = await clasificarMensaje(texto);
 
-      if (sugiereAgresorDesconocido(texto)) {
-        session.contexto.vinculoRespuesta = 'NO';
-        session.contexto.materiaDetectada = 'Penal';
+      // 1) Inferencia institucional por Competencias (manda si matchea)
+      const inferido = inferirPorCompetencias(texto, knowledge.competencias);
+      if (inferido?.materia) {
+        session.contexto.materiaDetectada = inferido.materia;
+        session.contexto.delitoEspecifico = inferido.delitoEspecifico || null;
       } else {
-        if (!clasif.materia && (clasif.tipo === 'denuncia' || textoSugiereDenunciaPenal(texto))) {
+        session.contexto.delitoEspecifico = clasif.delito_especifico || null;
+
+        // Agresor desconocido -> evitar ASK_VINCULO, ir a Penal
+        if (sugiereAgresorDesconocido(texto) || sugiereAgresorNoFamiliar(texto)) {
+          session.contexto.vinculoRespuesta = 'NO';
           session.contexto.materiaDetectada = 'Penal';
         } else {
-          session.contexto.materiaDetectada = clasif.materia || null;
+          // default Penal si es denuncia y la IA no define materia
+          if (!clasif.materia && (clasif.tipo === 'denuncia' || textoSugiereDenunciaPenal(texto))) {
+            session.contexto.materiaDetectada = 'Penal';
+          } else {
+            session.contexto.materiaDetectada = clasif.materia || null;
+          }
         }
       }
+
+      session.contexto.distritoTexto = clasif.distrito || null;
+
+      if (!session.contexto.materiaDetectada) {
+        session.estado = 'INICIO';
+        return {
+          respuestaTexto:
+            'Para orientarle, por favor describa brevemente qué ocurrió (por ejemplo: “me robaron”, “me amenazaron”, “violencia familiar”, “caso ambiental”, etc.).',
+          session
+        };
+      }
+
+      session.estado = 'DERIVACION';
     }
-
-    session.contexto.distritoTexto = clasif.distrito || null;
-
-    // Si aún no hay materia, NO ir a derivación
-    if (!session.contexto.materiaDetectada) {
-      session.estado = 'INICIO';
-      return {
-        respuestaTexto:
-          'Para orientarle, por favor describa brevemente qué ocurrió (por ejemplo: “me robaron”, “me amenazaron”, “violencia familiar”, “caso ambiental”, etc.).',
-        session
-      };
-    }
-
-    session.estado = 'DERIVACION';
   }
 
   // Derivación / distrito

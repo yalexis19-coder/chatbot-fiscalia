@@ -271,6 +271,27 @@ async function responderIA(session, texto) {
 
   // Cierre conversacional
   if (session.estado === 'FINAL') {
+    // ✅ Si el usuario escribe "Denuncia" (o parecido) en cierre, iniciar nuevo caso
+    if (esInicioDenuncia(texto)) {
+      const textoLimpio = (texto || '').replace(/denuncia(r)?/ig, '').trim();
+      session.estado = 'ESPERANDO_RELATO';
+      session.finalTurns = 0;
+      session.contexto.distritoTexto = null;
+      session.contexto.delitoEspecifico = null;
+      session.contexto.materiaDetectada = null;
+      session.contexto.vinculoRespuesta = null;
+
+      // Si ya venía con relato, usarlo directamente
+      if (normalize(textoLimpio).length > 10) {
+        return responderIA(session, textoLimpio);
+      }
+
+      return {
+        respuestaTexto:
+          'Perfecto. Cuéntame, por favor, ¿qué ocurrió? Puedes describir los hechos con tus palabras.',
+        session
+      };
+    }
     session.finalTurns += 1;
     if (session.finalTurns === 1) {
       return {

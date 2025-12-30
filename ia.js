@@ -389,30 +389,29 @@ async function responderIA(session, texto) {
     } else {
       const clasif = await clasificarMensaje(texto);
 
-// 1) Inferencia institucional por Competencias (data-driven)
-const inferido = inferirPorCompetencias(texto, knowledge.competencias);
-if (inferido?.materia) {
-  session.contexto.materiaDetectada = inferido.materia;
-  session.contexto.delitoEspecifico = inferido.delitoEspecifico || null;
+      // 1) Inferencia institucional por Competencias (manda si matchea)
+      const inferido = inferirPorCompetencias(texto, knowledge.competencias);
+      if (inferido?.materia) {
+        session.contexto.materiaDetectada = inferido.materia;
+        session.contexto.delitoEspecifico = inferido.delitoEspecifico || null;
 } else {
-  // 2) Fallback IA: útil cuando no calza con Competencias
-session.contexto.delitoEspecifico = clasif.delito_especifico || null;
+  // 2) Fallback IA: cuando no calza con Competencias
+  session.contexto.delitoEspecifico = clasif.delito_especifico || null;
 
-// Agresor no familiar (vecino/desconocido) -> Penal por defecto
-if (sugiereAgresorDesconocido(texto) || sugiereAgresorNoFamiliar(texto)) {
-  session.contexto.vinculoRespuesta = 'NO';
-  session.contexto.materiaDetectada = 'Penal';
-} else {
-  // ✅ NO asumir Penal automáticamente.
-  // Si la IA detecta una materia (p.ej. Violencia, Familia, Prevencion, Ambiental, Corrupción, etc.), la usamos
-  // para derivar por ReglasCompetencia y cubrir todo el espectro.
-  session.contexto.materiaDetectada = clasif.materia || null;
+  // Si el relato sugiere agresor NO familiar (vecino/desconocido), marcamos NO vínculo y Penal.
+  if (sugiereAgresorDesconocido(texto) || sugiereAgresorNoFamiliar(texto)) {
+    session.contexto.vinculoRespuesta = 'NO';
+    session.contexto.materiaDetectada = 'Penal';
+  } else {
+    // ✅ NO asumir Penal automáticamente.
+    // Si la IA detecta una materia (incluye Familia/Prevencion), la usamos para derivar por ReglasCompetencia.
+    session.contexto.materiaDetectada = clasif.materia || null;
+  }
 }
 
 
-session.contexto.distritoTexto = clasif.distrito || null;
-// ✅ Si no se pudo identificar materia ni por Competencias ni por IA, pedir al ciudadano que elija una materia.
-// (Evita asumir Penal y mantiene cobertura total).
+      session.contexto.distritoTexto = clasif.distrito || null;
+// Si no se pudo identificar materia ni por Competencias ni por IA, pedir al ciudadano que elija una materia.
 if (!session.contexto.materiaDetectada) {
   session.estado = 'ESPERANDO_MATERIA';
   return {
@@ -430,7 +429,6 @@ if (!session.contexto.materiaDetectada) {
     session
   };
 }
-
 
       if (!session.contexto.materiaDetectada) {
         session.estado = 'INICIO';
@@ -497,7 +495,6 @@ if (!session.contexto.materiaDetectada) {
     };
   }
 
-  // Vínculo
 // ---------------------------
 // Materia (cuando no se pudo inferir)
 // ---------------------------
@@ -553,6 +550,8 @@ if (session.estado === 'ESPERANDO_MATERIA') {
   return responderIA(session, session.contexto.distritoTexto);
 }
 
+
+  // Vínculo
   if (session.estado === 'ESPERANDO_VINCULO') {
     const resp = esRespuestaSiNo(texto);
     if (!resp) return { respuestaTexto: 'Por favor responda solo "sí" o "no".', session };

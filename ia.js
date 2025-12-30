@@ -1,9 +1,6 @@
 // ia.js
 // Lógica principal de IA – Ministerio Público (Fiscalía de Cajamarca)
 // FUNCIÓN 1: Derivación a fiscalía competente (materia + distrito + vínculo si aplica)
-//
-// Este archivo mantiene el contrato:
-//   responderIA(session, texto) -> { respuestaTexto, session }
 
 const OpenAI = require('openai');
 const { resolverFiscalia } = require('./derivacion');
@@ -44,12 +41,20 @@ function levenshtein(a, b) {
   return dp[m][n];
 }
 
+function esSaludo(texto) {
+  const t = normalize(texto);
+  if (!t) return false;
+  return [
+    'hola','buenas','buenos dias','buenas tardes','buenas noches','hey','ola','holi'
+  ].includes(t);
+}
+
 function tokensUtiles(texto) {
   const stop = new Set([
     'de','del','la','el','los','las','y','o','u','a','en','por','para','con','sin','un','una','unos','unas',
     'que','se','me','mi','mis','su','sus','al','lo','le','les','ya','ayer','hoy','manana','mañana',
     'es','esta','está','estan','están','estuvo','haber','hay','hubo','fue','eran','soy','eres','somos',
-    'quiero','deseo','necesito','porfavor','por favor'
+    'quiero','deseo','necesito','porfavor','por favor','ok','gracias'
   ]);
   const t = normalize(texto).replace(/[^a-z0-9\s]/g, ' ');
   return t.split(/\s+/).filter(w => w.length >= 3 && !stop.has(w));
@@ -98,7 +103,6 @@ function esComandoOtraConsulta(texto) {
 function esInicioDenuncia(texto) {
   const t = normalize(texto);
   if (!t) return false;
-  // acepta "denuncia" con pequeños errores (denncia, denucia, etc.)
   const solo = t.replace(/[^a-z]/g, '');
   if (solo.includes('denunci')) return true;
   return levenshtein(solo, 'denuncia') <= 2;
@@ -109,10 +113,13 @@ function textoSugiereDenunciaPenal(texto) {
   return ['robaron','robo','asalto','extorsion','extorsión','amenaza','amenazaron','golpearon','agredio','agredió','violacion','violación','matar','homicidio','secuestro','droga'].some(k => t.includes(normalize(k)));
 }
 
+function pareceRelato(texto) {
+  const toks = tokensUtiles(texto);
+  return toks.length >= 5 || normalize(texto).length >= 25 || textoSugiereDenunciaPenal(texto) || pareceCasoFamilia(texto);
+}
+
 // ---------------------------
 // Inferencia por Competencias (data-driven)
-// 1) Match por ESPECIFICO (cuando el ciudadano lo menciona)
-// 2) Match por DESCRIPCION (scoring conservador)
 // ---------------------------
 function inferirPorCompetencias(texto, competencias) {
   if (!Array.isArray(competencias) || !texto) return null;
@@ -120,27 +127,22 @@ function inferirPorCompetencias(texto, competencias) {
   const tNorm = normalize(texto);
   if (!tNorm) return null;
 
-  // 1) Match fuerte por ESPECIFICO
+  // 1) ESPECIFICO
   let bestEsp = null;
   for (const c of competencias) {
     const esp = normalize(c.especifico);
     if (!esp || esp.length < 5) continue;
     if (tNorm.includes(esp)) {
-      if (!bestEsp || esp.length > bestEsp.espLen) {
-        bestEsp = { row: c, espLen: esp.length };
-      }
+      if (!bestEsp || esp.length > bestEsp.espLen) bestEsp = { row: c, espLen: esp.length };
     }
   }
   if (bestEsp) {
-    return {
-      materia: bestEsp.row.categoria || null,
-      delitoEspecifico: bestEsp.row.especifico || null
-    };
+    return { materia: bestEsp.row.categoria || null, delitoEspecifico: bestEsp.row.especifico || null };
   }
 
-  // 2) Scoring por DESCRIPCION (conservador)
+  // 2) DESCRIPCION (conservador)
   const tokensMsg = tokensUtiles(texto);
-  if (tokensMsg.length < 4) return null; // muy poco texto, no arriesgar
+  if (tokensMsg.length < 5) return null;
 
   let best = null;
   for (const c of competencias) {
@@ -148,19 +150,13 @@ function inferirPorCompetencias(texto, competencias) {
     if (!desc || desc.length < 25) continue;
 
     const tokensDesc = tokensUtiles(desc);
-    if (tokensDesc.length < 6) continue;
+    if (tokensDesc.length < 8) continue;
 
-    // score: intersección de tokens
     const setDesc = new Set(tokensDesc);
     let hit = 0;
-    for (const w of tokensMsg) {
-      if (setDesc.has(w)) hit++;
-    }
+    for (const w of tokensMsg) if (setDesc.has(w)) hit++;
 
-    // ratio simple
     const ratio = hit / Math.min(tokensMsg.length, 12);
-
-    // umbral conservador
     if (hit >= 4 && ratio >= 0.35) {
       const score = hit * 10 + Math.round(ratio * 100);
       if (!best || score > best.score) best = { row: c, score };
@@ -168,18 +164,13 @@ function inferirPorCompetencias(texto, competencias) {
   }
 
   if (!best) return null;
-
-  // Re-umbral final por seguridad
   if (best.score < 55) return null;
 
-  return {
-    materia: best.row.categoria || null,
-    delitoEspecifico: best.row.especifico || null
-  };
+  return { materia: best.row.categoria || null, delitoEspecifico: best.row.especifico || null };
 }
 
 // ---------------------------
-// Clasificador IA (solo apoyo)
+// Clasificador IA (apoyo)
 // ---------------------------
 async function clasificarMensaje(texto) {
   const system = `
@@ -194,8 +185,6 @@ Devuelve SOLO este JSON (sin texto adicional):
 
 Reglas:
 - No inventes distrito. Si no es claro, usa null.
-- Si el mensaje trata sobre alimentos/tenencia/visitas/custodia, usa "familia".
-- Si se trata de violencia en el grupo familiar, usa "violencia" (pero puede requerir confirmar vínculo).
 `.trim();
 
   const res = await openai.chat.completions.create({
@@ -214,7 +203,6 @@ Reglas:
 // Flujo principal
 // ---------------------------
 async function responderIA(session, texto) {
-  // init
   if (!session) session = {};
   if (!session.contexto) {
     session.contexto = {
@@ -227,7 +215,15 @@ async function responderIA(session, texto) {
   if (!session.estado) session.estado = 'INICIO';
   if (typeof session.finalTurns !== 'number') session.finalTurns = 0;
 
-  const t = normalize(texto || '');
+  // Saludo: NO iniciar derivación
+  if (esSaludo(texto) && (session.estado === 'INICIO' || session.estado === 'FINAL')) {
+    session.estado = 'INICIO';
+    return {
+      respuestaTexto:
+        'Hola 👋 Puedes elegir una opción del menú. Si deseas denunciar, escribe *Denuncia* o cuéntame brevemente qué ocurrió.',
+      session
+    };
+  }
 
   // Comandos globales
   if (esComandoMenu(texto)) {
@@ -273,10 +269,9 @@ async function responderIA(session, texto) {
     };
   }
 
-  // Cierre conversacional: evitar loops
+  // Cierre conversacional
   if (session.estado === 'FINAL') {
     session.finalTurns += 1;
-
     if (session.finalTurns === 1) {
       return {
         respuestaTexto:
@@ -288,25 +283,17 @@ async function responderIA(session, texto) {
         session
       };
     }
-
-    // si insiste, no repetir lo mismo
-    return {
-      respuestaTexto:
-        'Para continuar, escriba *Menú* (volver al inicio) o *Denuncia* (nuevo caso).',
-      session
-    };
+    return { respuestaTexto: 'Para continuar, escriba *Menú* o *Denuncia*.', session };
   }
 
-  // Inicio de Denuncia (con fix: si ya viene relato, usarlo)
+  // Estado INICIO: SOLO pasar a relato si corresponde
   if (session.estado === 'INICIO') {
     if (esInicioDenuncia(texto)) {
       const textoLimpio = (texto || '').replace(/denuncia(r)?/ig, '').trim();
-
       session.estado = 'ESPERANDO_RELATO';
       session.finalTurns = 0;
 
       if (normalize(textoLimpio).length > 10) {
-        // Tratar el mismo mensaje como relato
         return responderIA(session, textoLimpio);
       }
 
@@ -317,13 +304,20 @@ async function responderIA(session, texto) {
       };
     }
 
-    // si escribe directo el caso sin decir "denuncia"
+    // Si NO parece relato, no iniciar derivación
+    if (!pareceRelato(texto)) {
+      return {
+        respuestaTexto:
+          'Puedo orientarte si deseas **presentar una denuncia**. Escribe *Denuncia* o cuéntame brevemente qué ocurrió (por ejemplo: “me robaron en …”).',
+        session
+      };
+    }
+
     session.estado = 'ESPERANDO_RELATO';
   }
 
-  // Relato / Clasificación / Derivación
+  // Relato
   if (session.estado === 'ESPERANDO_RELATO') {
-    // si parece familia civil, directo
     if (pareceCasoFamilia(texto)) {
       session.contexto.materiaDetectada = 'familia';
       session.contexto.delitoEspecifico = null;
@@ -340,7 +334,6 @@ async function responderIA(session, texto) {
 
     const clasif = await clasificarMensaje(texto);
 
-    // 1) Inferencia institucional por Competencias (si matchea, manda)
     const inferido = inferirPorCompetencias(texto, knowledge.competencias);
     if (inferido?.materia) {
       session.contexto.materiaDetectada = inferido.materia;
@@ -348,12 +341,10 @@ async function responderIA(session, texto) {
     } else {
       session.contexto.delitoEspecifico = clasif.delito_especifico || null;
 
-      // caso "desconocido" -> evitar ASK_VINCULO, ir a Penal
       if (sugiereAgresorDesconocido(texto)) {
         session.contexto.vinculoRespuesta = 'NO';
         session.contexto.materiaDetectada = 'Penal';
       } else {
-        // default Penal si es denuncia y la IA no define materia
         if (!clasif.materia && (clasif.tipo === 'denuncia' || textoSugiereDenunciaPenal(texto))) {
           session.contexto.materiaDetectada = 'Penal';
         } else {
@@ -364,13 +355,31 @@ async function responderIA(session, texto) {
 
     session.contexto.distritoTexto = clasif.distrito || null;
 
+    // Si aún no hay materia, NO ir a derivación
+    if (!session.contexto.materiaDetectada) {
+      session.estado = 'INICIO';
+      return {
+        respuestaTexto:
+          'Para orientarle, por favor describa brevemente qué ocurrió (por ejemplo: “me robaron”, “me amenazaron”, “violencia familiar”, “caso ambiental”, etc.).',
+        session
+      };
+    }
+
     session.estado = 'DERIVACION';
   }
 
-  // Esperando distrito / Derivación
+  // Derivación / distrito
   if (session.estado === 'DERIVACION' || session.estado === 'ESPERANDO_DISTRITO') {
+    if (!session.contexto.materiaDetectada) {
+      session.estado = 'INICIO';
+      return {
+        respuestaTexto:
+          'Para orientarle, por favor cuénteme brevemente qué ocurrió o escriba *Denuncia* para iniciar.',
+        session
+      };
+    }
+
     if (!session.contexto.distritoTexto) {
-      // si estamos esperando distrito, usar el texto como distrito
       session.contexto.distritoTexto = texto;
     }
 
@@ -392,7 +401,6 @@ async function responderIA(session, texto) {
       return { respuestaTexto: res.mensaje, session };
     }
 
-    // NO_MATCH / ASK_CLARIFY
     session.estado = 'ESPERANDO_RELATO';
     return {
       respuestaTexto:
@@ -401,24 +409,18 @@ async function responderIA(session, texto) {
     };
   }
 
-  // Vínculo familiar
+  // Vínculo
   if (session.estado === 'ESPERANDO_VINCULO') {
     const resp = esRespuestaSiNo(texto);
-    if (!resp) {
-      return {
-        respuestaTexto: 'Por favor responda solo "sí" o "no".',
-        session
-      };
-    }
+    if (!resp) return { respuestaTexto: 'Por favor responda solo "sí" o "no".', session };
 
     session.contexto.vinculoRespuesta = resp;
     session.estado = 'DERIVACION';
 
-    // no reinyectar el mismo texto "sí/no" como distrito; mantener distrito actual
-    return responderIA(session, session.contexto.distritoTexto || texto);
+    // volver a derivar sin usar "sí/no" como distrito
+    return responderIA(session, session.contexto.distritoTexto || '');
   }
 
-  // Default
   return {
     respuestaTexto:
       'Hola 👋 Puedes elegir una opción del menú. Si deseas denunciar, escribe *Denuncia* o cuéntame brevemente qué ocurrió.',

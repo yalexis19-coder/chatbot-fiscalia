@@ -431,7 +431,18 @@ async function responderIA(session, texto) {
       };
     }
 
+    // ✅ Si aún no tenemos distrito, primero preguntarlo (no usar el mismo relato como distrito)
     if (!session.contexto.distritoTexto) {
+      session.estado = 'ESPERANDO_DISTRITO';
+      return {
+        respuestaTexto:
+          'Entiendo. Para orientarle correctamente, indíqueme en qué distrito ocurrieron los hechos.',
+        session
+      };
+    }
+
+    // Si ya estamos esperando distrito, tomar la respuesta como distrito y continuar
+    if (session.estado === 'ESPERANDO_DISTRITO') {
       session.contexto.distritoTexto = texto;
     }
 

@@ -145,6 +145,119 @@ function sugiereAgresorDesconocido(texto) {
     'no sé quién es'
   ];
   return claves.some(k => t.includes(k));
+
+// ---------------------------
+// Inferencia por Competencias (data-driven)
+// - 1) Match por ESPECIFICO (si el ciudadano lo menciona)
+// - 2) Match por DESCRIPCION (scoring por palabras clave)
+// ---------------------------
+
+const STOPWORDS_ES = new Set([
+  'de','la','el','los','las','y','o','u','a','ante','bajo','con','contra','desde','durante','en',
+  'entre','hacia','hasta','mediante','para','por','segun','sin','sobre','tras','del','al',
+  'que','quien','quienes','cual','cuales','cuando','como','donde','porque','por que',
+  'un','una','unos','unas','mi','mis','tu','tus','su','sus','me','te','se','lo','la','le','les',
+  'ya','muy','mas','más','menos','si','sí','no','pero','tambien','también','ahora','ayer','hoy',
+  'fue','era','son','es','esta','está','estan','están','estuvo','haber','hay','hubo','tener'
+]);
+
+function getField(obj, ...keys) {
+  for (const k of keys) {
+    if (obj && obj[k] !== undefined && obj[k] !== null) return obj[k];
+  }
+  return null;
+}
+
+function tokensUtiles(texto) {
+  const t = normalize(texto)
+    .replace(/[^a-z0-9ñ\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!t) return [];
+  const toks = t.split(' ')
+    .map(x => x.trim())
+    .filter(x => x.length >= 3 && !STOPWORDS_ES.has(x));
+  return toks;
+}
+
+function scoreOverlap(textTokens, descTokens) {
+  if (!textTokens.length || !descTokens.length) return 0;
+  const setText = new Set(textTokens);
+  let overlap = 0;
+  for (const tok of descTokens) {
+    if (setText.has(tok)) overlap += 1;
+  }
+  // Normalización suave para no favorecer descripciones larguísimas
+  return overlap / Math.sqrt(descTokens.length);
+}
+
+// Retorna { materia, delitoEspecifico } o null
+function inferirPorCompetencias(texto, competencias) {
+  if (!Array.isArray(competencias) || !texto) return null;
+
+  const tNorm = normalize(texto);
+
+  // 1) Match fuerte por ESPECIFICO (cuando el ciudadano lo menciona)
+  let bestExact = null;
+  for (const c of competencias) {
+    const espRaw = getField(c, 'especifico', 'ESPECIFICO');
+    const catRaw = getField(c, 'categoria', 'CATEGORIA');
+    const esp = normalize(espRaw);
+    if (!esp || esp.length < 5) continue;
+
+    if (tNorm.includes(esp)) {
+      // el más largo gana
+      if (!bestExact || esp.length > bestExact.espLen) {
+        bestExact = { materia: catRaw || null, delitoEspecifico: espRaw || null, espLen: esp.length };
+      }
+    }
+  }
+  if (bestExact) {
+    return { materia: bestExact.materia, delitoEspecifico: bestExact.delitoEspecifico };
+  }
+
+  // 2) Match por DESCRIPCION (cuando no menciona el nombre)
+  const tTokens = tokensUtiles(texto);
+  if (tTokens.length < 3) return null;
+
+  let best = null;
+  let second = null;
+
+  for (const c of competencias) {
+    const descRaw = getField(c, 'descripcion', 'DESCRIPCION');
+    const espRaw = getField(c, 'especifico', 'ESPECIFICO');
+    const catRaw = getField(c, 'categoria', 'CATEGORIA');
+
+    if (!descRaw || !espRaw) continue;
+
+    const dTokens = tokensUtiles(descRaw);
+    if (dTokens.length < 5) continue;
+
+    const s = scoreOverlap(tTokens, dTokens);
+
+    // umbrales conservadores para evitar falsos positivos
+    // (puedes ajustar luego según pruebas)
+    if (s < 0.65) continue;
+
+    const cand = { score: s, materia: catRaw || null, delitoEspecifico: espRaw || null };
+
+    if (!best || cand.score > best.score) {
+      second = best;
+      best = cand;
+    } else if (!second || cand.score > second.score) {
+      second = cand;
+    }
+  }
+
+  // Si hay empate fuerte, preferimos NO forzar y dejar que la IA decida
+  if (best && second && Math.abs(best.score - second.score) < 0.10) {
+    return null;
+  }
+
+  return best ? { materia: best.materia, delitoEspecifico: best.delitoEspecifico } : null;
+}
+
 }
 
 // ---------------------------
@@ -298,18 +411,29 @@ async function responderIA(session, texto) {
 
     const clasif = await clasificarMensaje(texto);
 
-    session.contexto.delitoEspecifico = clasif.delito_especifico || null;
-
-    // ✅ Si el relato dice "desconocido": asumir vínculo NO y derivar como Penal (sin preguntar vínculo)
-    if (sugiereAgresorDesconocido(texto)) {
-      session.contexto.vinculoRespuesta = 'NO';
-      session.contexto.materiaDetectada = 'Penal';
+    // ✅ Refuerzo data-driven con Competencias (ESPECIFICO / DESCRIPCION)
+    const inferido = inferirPorCompetencias(texto, knowledge.competencias);
+    if (inferido) {
+      session.contexto.delitoEspecifico = inferido.delitoEspecifico || null;
+      session.contexto.materiaDetectada = inferido.materia || null;
     } else {
+      session.contexto.delitoEspecifico = clasif.delito_especifico || null;
+
       // Default Penal si es denuncia y la IA no define materia
       if (!clasif.materia && (clasif.tipo === 'denuncia' || textoSugiereDenunciaPenal(texto))) {
         session.contexto.materiaDetectada = 'Penal';
       } else {
         session.contexto.materiaDetectada = clasif.materia || null;
+      }
+    }
+
+    // ✅ Si el relato indica agresor desconocido, evitar "violencia" por vínculo:
+    // solo forzar Penal cuando la materia actual es violencia/penal o no está definida.
+    if (sugiereAgresorDesconocido(texto)) {
+      const m = normalize(session.contexto.materiaDetectada);
+      if (!m || m === 'penal' || m === 'violencia') {
+        session.contexto.vinculoRespuesta = 'NO';
+        session.contexto.materiaDetectada = 'Penal';
       }
     }
 

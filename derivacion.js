@@ -60,6 +60,7 @@ function findDistritoRecord(distritos, distritoTexto) {
   // 2) contiene / variante
   rec = distritos.find((x) => normalize(x.distrito).includes(d) || d.includes(normalize(x.distrito)));
   return rec || null;
+}
 
 function resolverAliasDistrito(aliasDistritos, distritoTexto) {
   const t = normalize(distritoTexto);
@@ -68,7 +69,6 @@ function resolverAliasDistrito(aliasDistritos, distritoTexto) {
   return hit ? hit.distrito_destino : null;
 }
 
-}
 
 function findFiscaliaByCodigo(fiscalias, codigo) {
   const c = normalize(codigo);

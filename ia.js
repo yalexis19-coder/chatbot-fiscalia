@@ -7,6 +7,7 @@
 
 const OpenAI = require('openai');
 const { resolverFiscalia } = require('./derivacion');
+const knowledge = require('./knowledge.json');
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -145,6 +146,7 @@ function sugiereAgresorDesconocido(texto) {
     'no sé quién es'
   ];
   return claves.some(k => t.includes(k));
+}
 
 // ---------------------------
 // Inferencia por Competencias (data-driven)
@@ -257,9 +259,6 @@ function inferirPorCompetencias(texto, competencias) {
 
   return best ? { materia: best.materia, delitoEspecifico: best.delitoEspecifico } : null;
 }
-
-}
-
 // ---------------------------
 // Clasificador IA
 // ---------------------------

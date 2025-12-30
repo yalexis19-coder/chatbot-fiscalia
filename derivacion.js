@@ -180,6 +180,33 @@ function resolverFiscalia(contexto) {
   const distritoRec = findDistritoRecord(distritos, distritoTexto);
   const distritoFinal = distritoRec?.distrito || distritoTexto;
 
+
+  // 🔒 PRIORIDAD ABSOLUTA PARA FAMILIA
+  if (
+    materia === 'familia' &&
+    distritoRec &&
+    distritoRec.fiscalia_familia_codigo
+  ) {
+    const fiscaliaFam = findFiscaliaByCodigo(
+      fiscalias,
+      distritoRec.fiscalia_familia_codigo
+    );
+
+    if (fiscaliaFam) {
+      return {
+        status: 'OK',
+        codigoFiscalia: distritoRec.fiscalia_familia_codigo,
+        fiscalia: fiscaliaFam,
+        mensaje: formatearRespuestaFiscalia({
+          fiscalia: fiscaliaFam,
+          observacion: 'Atención en Fiscalía de Familia del distrito.',
+          materia,
+          distrito: distritoFinal
+        })
+      };
+    }
+  }
+
   // 5) Priorización (ReglasCompetencia)
   //    Prioridad A: Materia + Alcance=District + distrito exacto
   //    Prioridad B: Materia + Alcance=Distrito Fiscal y distrito vacío

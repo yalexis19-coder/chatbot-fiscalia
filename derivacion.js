@@ -98,6 +98,23 @@ function findCompetenciaByEspecifico(competencias, delitoEspecifico) {
   return competencias.find((c) => normalize(c.especifico) === e) || null;
 }
 
+
+function resolverAliasDistrito(aliasDistritos, distritoTexto) {
+  const t = normalize(distritoTexto);
+  if (!t) return null;
+  if (!Array.isArray(aliasDistritos) || aliasDistritos.length === 0) return null;
+
+  // Match exact alias
+  let hit = aliasDistritos.find((a) => normalize(a.alias) === t);
+  if (hit && hit.distrito_destino) return hit.distrito_destino;
+
+  // Match by inclusion (por si escriben "San Marcos (ciudad)" u otras variantes)
+  hit = aliasDistritos.find((a) => t.includes(normalize(a.alias)));
+  if (hit && hit.distrito_destino) return hit.distrito_destino;
+
+  return null;
+}
+
 function formatearRespuestaFiscalia({ fiscalia, observacion, materia, distrito }) {
   const lineas = [];
 
@@ -128,6 +145,7 @@ function resolverFiscalia(contexto) {
   const reglas = Array.isArray(knowledge.reglasCompetencia) ? knowledge.reglasCompetencia : [];
   const distritos = Array.isArray(knowledge.distritos) ? knowledge.distritos : [];
   const fiscalias = Array.isArray(knowledge.fiscalias) ? knowledge.fiscalias : [];
+  const aliasDistritos = Array.isArray(knowledge.aliasDistritos) ? knowledge.aliasDistritos : [];
 
   // 1) Materia base (desde IA)
   let materia = materiaCanonica(contexto?.materiaDetectada);
@@ -198,8 +216,11 @@ function resolverFiscalia(contexto) {
     };
   }
 
-  const distritoRec = findDistritoRecord(distritos, distritoTexto);
-  const distritoFinal = distritoRec?.distrito || distritoTexto;
+  const distritoAlias = resolverAliasDistrito(aliasDistritos, distritoTexto);
+  const distritoParaBuscar = distritoAlias || distritoTexto;
+
+  const distritoRec = findDistritoRecord(distritos, distritoParaBuscar);
+  const distritoFinal = distritoRec?.distrito || distritoParaBuscar;
 
   // 5) Priorización por ReglasCompetencia
   let regla = findReglaDistrito(reglas, materia, distritoFinal);

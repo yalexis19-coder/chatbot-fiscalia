@@ -1,10 +1,9 @@
 // derivacion.js
 // Motor de derivación basado en knowledge.json
-// Lógica simple:
-// 1) Identificar delito y materia (idealmente desde hoja Competencias vía ia.js).
-// 2) Si es violencia, confirmar vínculo si no está definido.
-// 3) Si es Penal y Competencias dice DEPENDE, preguntar vínculo; si SI -> Categoria_si_familiar; si NO -> Penal.
-// 4) Con materia final + distrito, aplicar ReglasCompetencia.
+// Ajustes clave:
+// - AliasDistritos + tolerancia a typos leves (fuzzy match)
+// - Vínculo familiar SOLO se pregunta si el distrito tiene Fiscalía de Violencia
+// - Si el relato sugiere agresión y el distrito tiene violencia, pero no se identificó delito_especifico, se pregunta vínculo.
 
 const knowledge = require('./knowledge.json');
 
@@ -39,17 +38,80 @@ function normalizarRequiereVinculo(v) {
   return null;
 }
 
+// ---------------------------
+// Fuzzy matching (typos leves)
+// ---------------------------
+function levenshtein(a, b) {
+  a = normalize(a); b = normalize(b);
+  if (a === b) return 0;
+  if (!a) return (b || '').length;
+  if (!b) return (a || '').length;
+  const m = a.length, n = b.length;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + cost
+      );
+    }
+  }
+  return dp[m][n];
+}
+
+function bestFuzzyMatch(candidates, input, maxDist = 2) {
+  const t = normalize(input);
+  if (!t) return null;
+  let best = null;
+  for (const c of candidates) {
+    const d = levenshtein(t, c);
+    if (d <= maxDist && (!best || d < best.d)) best = { v: c, d };
+  }
+  return best ? best.v : null;
+}
+
+// ---------------------------
+// Resolver distrito (alias + fuzzy)
+// ---------------------------
 function resolverAliasDistrito(aliasDistritos, texto) {
   const t = normalize(texto);
   if (!t) return null;
-  const hit = (aliasDistritos || []).find(a => normalize(a.alias) === t);
-  return hit ? hit.distrito_destino : null;
+
+  const exact = (aliasDistritos || []).find(a => normalize(a.alias) === t);
+  if (exact) return exact.distrito_destino;
+
+  const cand = (aliasDistritos || []).map(a => normalize(a.alias)).filter(Boolean);
+  const hit = bestFuzzyMatch(cand, t, 2);
+  if (!hit) return null;
+
+  const row = (aliasDistritos || []).find(a => normalize(a.alias) === hit);
+  return row ? row.distrito_destino : null;
 }
 
 function findDistritoRecord(distritos, distritoTexto) {
   const d = normalize(distritoTexto);
   if (!d) return null;
-  return (distritos || []).find(x => normalize(x.distrito) === d) || null;
+
+  const exact = (distritos || []).find(x => normalize(x.distrito) === d);
+  if (exact) return exact;
+
+  const cand = (distritos || []).map(x => normalize(x.distrito)).filter(Boolean);
+  const hit = bestFuzzyMatch(cand, d, 2);
+  if (!hit) return null;
+
+  return (distritos || []).find(x => normalize(x.distrito) === hit) || null;
+}
+
+function tieneFiscaliaViolencia(distritoRec) {
+  if (!distritoRec) return false;
+  const tv = normalize(distritoRec.tiene_fiscalia_violencia);
+  if (tv === 'si' || tv === 'sí' || tv === 'true' || tv === '1') return true;
+  const cod = normalize(distritoRec.fiscalia_violencia_codigo);
+  return cod !== '';
 }
 
 function findFiscaliaByCodigo(fiscalias, codigo) {
@@ -77,18 +139,35 @@ function findReglaDistritoFiscal(reglas, materia) {
   ) || null;
 }
 
-function formatearRespuestaFiscalia({ fiscalia, materia, distrito, nota }) {
+function formatearRespuestaFiscalia({ fiscalia, materia, distrito, delito, nota }) {
   let msg =
-    `Según la información brindada, su caso correspondería a la materia *${materia}*.\n` +
-    `Distrito indicado: *${distrito}*.\n\n` +
-    `📌 *Fiscalía sugerida:* ${fiscalia.nombre_fiscalia}\n` +
-    `📍 Dirección: ${fiscalia.direccion}\n` +
-    `☎️ Teléfono: ${fiscalia.telefono}\n` +
+    `Según la información brindada, su caso correspondería a la materia *${materia}*.
+` +
+    `Distrito indicado: *${distrito}*.
+`;
+
+  // Mostrar el supuesto delito identificado solo cuando exista y no sea Familia/Prevencion
+  if (delito && normalize(materia) !== 'familia' && normalize(materia) !== 'prevencion') {
+    msg += `Delito probable identificado: *${delito}*.
+`;
+  }
+
+  msg +=
+    `
+📌 *Fiscalía sugerida:* ${fiscalia.nombre_fiscalia}
+` +
+    `📍 Dirección: ${fiscalia.direccion}
+` +
+    `☎️ Teléfono: ${fiscalia.telefono}
+` +
     `🕒 Horario: ${fiscalia.horario}`;
 
-  if (nota) msg += `\n\nℹ️ Nota: ${nota}`;
+  if (nota) msg += `
+
+ℹ️ Nota: ${nota}`;
   return msg;
 }
+
 
 function findCompetenciaByEspecifico(competencias, delitoEspecifico) {
   const e = normalize(delitoEspecifico);
@@ -96,14 +175,18 @@ function findCompetenciaByEspecifico(competencias, delitoEspecifico) {
   return (competencias || []).find(c => normalize(c.especifico) === e) || null;
 }
 
+
+// ---------------------------
+// Motor principal
+// ---------------------------
 function resolverFiscalia(contexto) {
   const { competencias, reglasCompetencia, distritos, fiscalias, aliasDistritos } = knowledge;
 
-  let materia = contexto.materiaDetectada || 'Penal';
+  let materia = contexto.materiaDetectada || null;
   const delitoEspecifico = contexto.delitoEspecifico || null;
   const vinculoRespuesta = contexto.vinculoRespuesta || null;
 
-  // Distrito (con alias)
+  // Distrito (alias + fuzzy)
   let distritoTexto = contexto.distritoTexto;
   if (isBlank(distritoTexto)) {
     return {
@@ -118,19 +201,18 @@ function resolverFiscalia(contexto) {
   const distritoRec = findDistritoRecord(distritos, distritoTexto);
   const distritoFinal = distritoRec ? distritoRec.distrito : distritoTexto;
 
-  // Prioridad Familia si ya viene como "familia"
+  // Prioridad Familia si ya viene como familia
   if (normalize(materia) === 'familia' && distritoRec?.fiscalia_familia_codigo) {
     const fiscaliaFam = findFiscaliaByCodigo(fiscalias, distritoRec.fiscalia_familia_codigo);
     if (fiscaliaFam) {
       return {
         status: 'OK',
         fiscalia: fiscaliaFam,
-        mensaje: formatearRespuestaFiscalia({ fiscalia: fiscaliaFam, materia: 'familia', distrito: distritoFinal })
+        mensaje: formatearRespuestaFiscalia({ fiscalia: fiscaliaFam, materia: 'Familia', distrito: distritoFinal, delito: null })
       };
     }
   }
 
-  // Competencia por delito específico (si existe)
   const comp = findCompetenciaByEspecifico(competencias, delitoEspecifico);
   const requiere = normalizarRequiereVinculo(
     comp?.['Requiere vinculo familiar'] ?? comp?.requiere_vinculo_familiar ?? comp?.requiereVinculoFamiliar
@@ -138,32 +220,42 @@ function resolverFiscalia(contexto) {
   const categoriaSiFamiliar =
     comp?.['Categoria_si_familiar'] ?? comp?.categoria_si_familiar ?? comp?.categoriaSiFamiliar ?? null;
 
-  // Si materia es violencia, confirmar vínculo si falta
+  const hayViolencia = tieneFiscaliaViolencia(distritoRec);
+
+  // 1) Si la materia es Violencia, SOLO preguntar vínculo si hay fiscalía de violencia.
   if (normalize(materia) === 'violencia' && !vinculoRespuesta) {
-    return {
-      status: 'ASK_VINCULO',
-      mensaje: 'Para orientarle mejor: ¿la persona denunciada es su pareja, expareja o un familiar cercano? Responda solo “sí” o “no”.'
-    };
+    if (hayViolencia) {
+      return {
+        status: 'ASK_VINCULO',
+        mensaje: 'Para orientarle mejor: ¿la persona denunciada es su pareja, expareja o un familiar cercano? Responda solo “sí” o “no”.'
+      };
+    }
+    materia = 'Penal';
   }
 
-  // Si Penal pero requiere vínculo depende/si, confirmar vínculo si falta
+  // 2) Si Penal y requiere vínculo (SI/DEPENDE), preguntar SOLO si hayViolencia
   if ((requiere === 'SI' || requiere === 'DEPENDE') && !vinculoRespuesta) {
-    return {
-      status: 'ASK_VINCULO',
-      mensaje: 'Para orientarle mejor: ¿la persona denunciada es su pareja, expareja o un familiar cercano? Responda solo “sí” o “no”.'
-    };
+    if (hayViolencia) {
+      return {
+        status: 'ASK_VINCULO',
+        mensaje: 'Para orientarle mejor: ¿la persona denunciada es su pareja, expareja o un familiar cercano? Responda solo “sí” o “no”.'
+      };
+    }
+    materia = 'Penal';
   }
 
-  // Resolver DEPENDE con respuesta
+  // 4) Resolver DEPENDE con respuesta
   if (requiere === 'DEPENDE' && vinculoRespuesta) {
     if (vinculoRespuesta === 'SI' && !isBlank(categoriaSiFamiliar)) materia = categoriaSiFamiliar;
     if (vinculoRespuesta === 'NO') materia = 'Penal';
   }
 
-  // Si era violencia y respondió NO, pasa a Penal
-  if (normalize(materia) === 'violencia' && vinculoRespuesta === 'NO') {
+  // 5) Si respondió NO, no debe quedar Violencia familiar
+  if (vinculoRespuesta === 'NO' && normalize(materia) === 'violencia') {
     materia = 'Penal';
   }
+
+  if (isBlank(materia)) return { status: 'NO_MATCH' };
 
   // ReglasCompetencia
   let regla = findReglaDistrito(reglasCompetencia, materia, distritoFinal);
@@ -180,6 +272,7 @@ function resolverFiscalia(contexto) {
       fiscalia,
       materia,
       distrito: distritoFinal,
+      delito: delitoEspecifico || null,
       nota: regla.observacion_opcional || null
     })
   };

@@ -71,7 +71,7 @@ function tokensUtiles(texto) {
     'de','del','la','el','los','las','y','o','u','a','en','por','para','con','sin','un','una','unos','unas',
     'que','se','me','mi','mis','su','sus','al','lo','le','les','ya','ayer','hoy','manana','mañana',
     'es','esta','está','estan','están','estuvo','haber','hay','hubo','fue','eran','soy','eres','somos',
-    'quiero','deseo','necesito','porfavor','por favor','ok','gracias'
+    'quiero','deseo','necesito','porfavor','por favor','ok','gracias','fiscalia','fiscalias'
   ]);
   const t = normalize(texto).replace(/[^a-z0-9\s]/g, ' ');
   return t.split(/\s+/).filter(w => w.length >= 3 && !stop.has(w));
@@ -241,14 +241,41 @@ function buscarFiscaliasPorTexto(texto, fiscalias) {
   const exactCodigo = fiscalias.find(f => normalize(f.codigo_fiscalia) === t);
   if (exactCodigo) return [exactCodigo];
 
+  // Si el texto incluye un distrito o provincia (por ejemplo: "familia celendin"),
+  // priorizar/filtrar por ese lugar antes del match por nombre. Esto mejora precisión y evita
+  // traer fiscalías de otras provincias cuando el usuario sí especificó el lugar.
+  const toksLugar = tokensUtiles(texto);
+  let distritoRecIn = null;
+  let provinciaIn = null;
+
+  // detectar distrito en cualquier token
+  for (const w of toksLugar) {
+    const drec = resolverDistritoRecordMenu(w);
+    if (drec) { distritoRecIn = drec; break; }
+  }
+  // detectar provincia en cualquier token (si no se detectó distrito)
+  if (!distritoRecIn) {
+    for (const w of toksLugar) {
+      const prov = resolverProvinciaRecordMenu(w);
+      if (prov) { provinciaIn = prov; break; }
+    }
+  }
+
+  let baseFiscalias = fiscalias;
+  if (distritoRecIn) {
+    baseFiscalias = obtenerFiscaliasParaDistritoRec(distritoRecIn, fiscalias);
+  } else if (provinciaIn) {
+    baseFiscalias = obtenerFiscaliasParaProvincia(provinciaIn, fiscalias);
+  }
+
   // match directo por nombre (contiene la frase completa)
-  const hitsFrase = fiscalias.filter(f => normalize(f.nombre_fiscalia).includes(t));
+  const hitsFrase = baseFiscalias.filter(f => normalize(f.nombre_fiscalia).includes(t));
   if (hitsFrase.length) return hitsFrase.slice(0, 5);
 
   // match por tokens (más natural): exige coincidencia de la mayoría de palabras útiles
-  const toks = tokensUtiles(texto);
+  const toks = tokensUtiles(texto).filter(w => w !== 'fiscalia' && w !== 'fiscalias');
   if (toks.length) {
-    const scored = fiscalias
+    const scored = baseFiscalias
       .map(f => {
         const hay = normalize(`${f.codigo_fiscalia || ''} ${f.nombre_fiscalia || ''} ${f.direccion || ''}`);
         let score = 0;
@@ -265,10 +292,10 @@ function buscarFiscaliasPorTexto(texto, fiscalias) {
   }
 
   // fuzzy por nombre (para typos leves) - frase completa
-  const cand = fiscalias.map(f => normalize(f.nombre_fiscalia)).filter(Boolean);
+  const cand = baseFiscalias.map(f => normalize(f.nombre_fiscalia)).filter(Boolean);
   const hit = bestFuzzyMatch(cand, t, 2);
   if (!hit) return [];
-  const row = fiscalias.find(f => normalize(f.nombre_fiscalia) === hit);
+  const row = baseFiscalias.find(f => normalize(f.nombre_fiscalia) === hit);
   return row ? [row] : [];
 }
 

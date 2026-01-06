@@ -241,11 +241,30 @@ function buscarFiscaliasPorTexto(texto, fiscalias) {
   const exactCodigo = fiscalias.find(f => normalize(f.codigo_fiscalia) === t);
   if (exactCodigo) return [exactCodigo];
 
-  // match por nombre (contiene)
-  const hits = fiscalias.filter(f => normalize(f.nombre_fiscalia).includes(t));
-  if (hits.length) return hits.slice(0, 5);
+  // match directo por nombre (contiene la frase completa)
+  const hitsFrase = fiscalias.filter(f => normalize(f.nombre_fiscalia).includes(t));
+  if (hitsFrase.length) return hitsFrase.slice(0, 5);
 
-  // fuzzy por nombre (para typos leves)
+  // match por tokens (más natural): exige coincidencia de la mayoría de palabras útiles
+  const toks = tokensUtiles(texto);
+  if (toks.length) {
+    const scored = fiscalias
+      .map(f => {
+        const hay = normalize(`${f.codigo_fiscalia || ''} ${f.nombre_fiscalia || ''} ${f.direccion || ''}`);
+        let score = 0;
+        for (const w of toks) if (hay.includes(w)) score++;
+        return { f, score };
+      })
+      .filter(x => x.score > 0)
+      .sort((a, b) => b.score - a.score);
+
+    // regla suave: si hay 2+ tokens, pedir al menos 2 coincidencias; si solo hay 1 token, 1 coincidencia
+    const minScore = toks.length >= 2 ? 2 : 1;
+    const top = scored.filter(x => x.score >= minScore).slice(0, 5).map(x => x.f);
+    if (top.length) return top;
+  }
+
+  // fuzzy por nombre (para typos leves) - frase completa
   const cand = fiscalias.map(f => normalize(f.nombre_fiscalia)).filter(Boolean);
   const hit = bestFuzzyMatch(cand, t, 2);
   if (!hit) return [];
@@ -271,6 +290,91 @@ function resolverDistritoRecordMenu(texto) {
   const hit = bestFuzzyMatch(cand, t, 2);
   if (!hit) return null;
   return (distritos || []).find(d => normalize(d.distrito) === hit) || null;
+}
+
+
+function resolverProvinciaRecordMenu(texto) {
+  const { distritos } = knowledge || {};
+  let t = normalize(texto);
+  if (!t) return null;
+
+  const provincias = Array.from(new Set((distritos || []).map(d => d.provincia).filter(Boolean)));
+  // match exacto
+  const exact = provincias.find(p => normalize(p) === t);
+  if (exact) return exact;
+
+  // fuzzy
+  const cand = provincias.map(p => normalize(p));
+  const hit = bestFuzzyMatch(cand, t, 2);
+  if (!hit) return null;
+  const row = provincias.find(p => normalize(p) === hit);
+  return row || null;
+}
+
+function fiscaliasPorLugar({ lugarKey, fiscalias }) {
+  const key = normalize(lugarKey);
+  if (!key) return [];
+  return (fiscalias || []).filter(f => {
+    const n = normalize(f.nombre_fiscalia);
+    const d = normalize(f.direccion);
+    return (n && n.includes(key)) || (d && d.includes(key));
+  });
+}
+
+function fiscaliasPorCodigos(codigos, fiscalias) {
+  const set = new Set((codigos || []).map(c => normalize(c)).filter(Boolean));
+  if (!set.size) return [];
+  const hits = (fiscalias || []).filter(f => set.has(normalize(f.codigo_fiscalia)));
+  return hits;
+}
+
+function obtenerFiscaliasParaDistritoRec(distritoRec, fiscalias) {
+  if (!distritoRec) return [];
+  const codigos = [];
+  if (distritoRec.fiscalia_penal_mixta_codigo) codigos.push(distritoRec.fiscalia_penal_mixta_codigo);
+  if (distritoRec.fiscalia_familia_codigo) codigos.push(distritoRec.fiscalia_familia_codigo);
+  if (normalize(distritoRec.tiene_fiscalia_violencia) === 'si' && distritoRec.fiscalia_violencia_codigo) {
+    codigos.push(distritoRec.fiscalia_violencia_codigo);
+  }
+  if (normalize(distritoRec.tiene_fiscalia_prevencion) === 'si' && distritoRec.fiscalia_prevencion_codigo) {
+    codigos.push(distritoRec.fiscalia_prevencion_codigo);
+  }
+
+  // 1) Por códigos (cuando el distrito deriva a una sede)
+  const porCodigo = fiscaliasPorCodigos(codigos, fiscalias);
+
+  // 2) Por “lugar” (provincia normalmente, para incluir 1ra/2da, corporativas, etc.)
+  const lugarKey = distritoRec.provincia || distritoRec.distrito;
+  const porLugar = fiscaliasPorLugar({ lugarKey, fiscalias });
+
+  // Unir sin duplicados
+  const map = new Map();
+  for (const f of [...porCodigo, ...porLugar]) map.set(normalize(f.codigo_fiscalia), f);
+  return Array.from(map.values()).sort((a, b) => (a.nombre_fiscalia || '').localeCompare(b.nombre_fiscalia || ''));
+}
+
+function obtenerFiscaliasParaProvincia(provincia, fiscalias) {
+  const { distritos } = knowledge || {};
+  const prov = provincia;
+  if (!prov) return [];
+
+  // 1) Códigos a partir de todos los distritos de la provincia (cubre sedes asignadas)
+  const rows = (distritos || []).filter(d => normalize(d.provincia) === normalize(prov));
+  const cods = [];
+  for (const r of rows) {
+    if (r.fiscalia_penal_mixta_codigo) cods.push(r.fiscalia_penal_mixta_codigo);
+    if (r.fiscalia_familia_codigo) cods.push(r.fiscalia_familia_codigo);
+    if (normalize(r.tiene_fiscalia_violencia) === 'si' && r.fiscalia_violencia_codigo) cods.push(r.fiscalia_violencia_codigo);
+    if (normalize(r.tiene_fiscalia_prevencion) === 'si' && r.fiscalia_prevencion_codigo) cods.push(r.fiscalia_prevencion_codigo);
+  }
+  const porCodigo = fiscaliasPorCodigos(cods, fiscalias);
+
+  // 2) Por texto del lugar (incluye sedes con el nombre de la provincia)
+  const porLugar = fiscaliasPorLugar({ lugarKey: prov, fiscalias });
+
+  const map = new Map();
+  for (const f of [...porCodigo, ...porLugar]) map.set(normalize(f.codigo_fiscalia), f);
+  return Array.from(map.values()).sort((a, b) => (a.nombre_fiscalia || '').localeCompare(b.nombre_fiscalia || ''));
 }
 
 function formatearFichaFiscalia(f) {
@@ -423,27 +527,77 @@ async function responderIA(session, texto) {
   // ---------------------------
   // Estados de MENÚ (FAQ/Contacto/Ubicación/Operador)
   // ---------------------------
+  
   if (session.estado === 'MENU_UBICACION') {
     const fiscalias = knowledge?.fiscalias || [];
-    const distritoRec = resolverDistritoRecordMenu(texto);
 
-    // 1) Si parece distrito => buscar fiscalía penal/mixta del distrito (si existe la columna)
-    if (distritoRec && distritoRec.fiscalia_penal_mixta_codigo) {
-      const f = (fiscalias || []).find(x => normalize(x.codigo_fiscalia) === normalize(distritoRec.fiscalia_penal_mixta_codigo));
-      if (f) {
+    // 1) Intentar resolver como DISTRITO (alias + fuzzy) => mostrar TODAS las fiscalías asociadas
+    const distritoRec = resolverDistritoRecordMenu(texto);
+    if (distritoRec) {
+      const lista = obtenerFiscaliasParaDistritoRec(distritoRec, fiscalias);
+
+      if (lista.length) {
         session.estado = 'FINAL';
         session.finalTurns = 0;
+
+        const tope = 12;
+        const visibles = lista.slice(0, tope);
+        const cuerpo = visibles.map(f => `
+
+${formatearFichaFiscalia(f)}`).join('');
+        const extra = lista.length > tope
+          ? `
+
+…y ${lista.length - tope} más. Si desea, escriba parte del nombre (ej.: “familia”, “turno”, “penal corporativa”).`
+          : '';
+
         return {
           respuestaTexto:
-            `✅ Distrito: *${distritoRec.distrito}*\n\n` +
-            formatearFichaFiscalia(f) +
-            `\n\nPuede escribir *Menú* para ver otras opciones.`,
+            `✅ Provincia: *${distritoRec.provincia}*
+✅ Distrito: *${distritoRec.distrito}*` +
+            cuerpo +
+            extra +
+            `
+
+Puede escribir *Menú* para ver otras opciones.`,
           session
         };
       }
     }
 
-    // 2) Buscar fiscalía por nombre/código
+    // 2) Intentar resolver como PROVINCIA (fuzzy) => mostrar TODAS las fiscalías de la provincia
+    const provincia = resolverProvinciaRecordMenu(texto);
+    if (provincia) {
+      const lista = obtenerFiscaliasParaProvincia(provincia, fiscalias);
+      if (lista.length) {
+        session.estado = 'FINAL';
+        session.finalTurns = 0;
+
+        const tope = 12;
+        const visibles = lista.slice(0, tope);
+        const cuerpo = visibles.map(f => `
+
+${formatearFichaFiscalia(f)}`).join('');
+        const extra = lista.length > tope
+          ? `
+
+…y ${lista.length - tope} más. Si desea, escriba parte del nombre (ej.: “familia”, “turno”, “penal corporativa”).`
+          : '';
+
+        return {
+          respuestaTexto:
+            `✅ Provincia: *${provincia}*` +
+            cuerpo +
+            extra +
+            `
+
+Puede escribir *Menú* para ver otras opciones.`,
+          session
+        };
+      }
+    }
+
+    // 3) Buscar fiscalía por nombre/código (match flexible)
     const hits = buscarFiscaliasPorTexto(texto, fiscalias);
     if (hits.length === 1) {
       session.estado = 'FINAL';
@@ -451,7 +605,9 @@ async function responderIA(session, texto) {
       return {
         respuestaTexto:
           formatearFichaFiscalia(hits[0]) +
-          `\n\nPuede escribir *Menú* para ver otras opciones.`,
+          `
+
+Puede escribir *Menú* para ver otras opciones.`,
         session
       };
     }
@@ -460,17 +616,23 @@ async function responderIA(session, texto) {
       session.menu = { tipo: 'UBICACION_LISTA', hits };
       return {
         respuestaTexto:
-          `Encontré varias coincidencias. Responda con el número para ver la ubicación:\n${listado}\n\nO escriba otro nombre/distrito.`,
+          `Encontré varias coincidencias. Responda con el número para ver la ubicación:
+${listado}
+
+` +
+          `O escriba un *distrito/provincia* (ej.: “Celendín”, “Cajamarca”) o parte del nombre.`,
         session
       };
     }
 
     return {
       respuestaTexto:
-        'No encontré esa fiscalía/distrito. Puede escribir:\n' +
-        '• el *nombre* de la fiscalía (ej.: “Fiscalía Provincial Penal…”) o\n' +
-        '• el *distrito* (ej.: “Baños del Inca”).\n\n' +
-        'También puede escribir *Menú* para volver.',
+        `No encontré coincidencias. Puede intentar:
+• escribir solo el *distrito* (ej.: “Jesús”, “Celendín”)
+• escribir la *provincia* (ej.: “Cajamarca”, “Chota”)
+• escribir parte del *nombre* (ej.: “familia”, “turno”, “penal corporativa”)
+
+También puede escribir *Menú* para volver.`,
       session
     };
   }

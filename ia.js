@@ -640,6 +640,24 @@ if (esComandoMenu(texto)) {
   if (session.estado === 'MENU_UBICACION') {
     const fiscalias = knowledge?.fiscalias || [];
 
+    // ✅ Si el usuario está eligiendo de una lista previa (número), resolver antes de volver a buscar
+    if (session.menu?.tipo === 'UBICACION_LISTA' && Array.isArray(session.menu.hits)) {
+      const t = normalize(texto);
+      const n = parseInt(t, 10);
+      if (!Number.isNaN(n) && n >= 1 && n <= session.menu.hits.length) {
+        const f = session.menu.hits[n - 1];
+        session.menu = null;
+        session.estado = 'FINAL';
+        session.finalTurns = 0;
+        return {
+          respuestaTexto:
+            formatearFichaFiscalia(f) +
+            `\n\nPuede escribir *Menú* para ver otras opciones.`,
+          session
+        };
+      }
+    }
+
     // 1) Intentar resolver como DISTRITO (alias + fuzzy) => mostrar TODAS las fiscalías asociadas
     const distritoRec = resolverDistritoRecordMenu(texto);
     if (distritoRec) {

@@ -185,6 +185,17 @@ function esComandoDocumentos(texto) {
   return t === 'documentos' || t === 'docs' || t === 'documento';
 }
 
+function esComandoIdioma(texto) {
+  const t = normalize(texto);
+  return (
+    t === 'idioma' ||
+    t === 'cambiar idioma' ||
+    t === 'cambio idioma' ||
+    t === 'language' ||
+    t === 'lengua'
+  );
+}
+
 function esComandoOtraConsulta(texto) {
   const t = normalize(texto);
   return t === 'otra consulta' || t === 'nuevo caso' || t === 'nuevo' || t === 'reiniciar';
@@ -581,7 +592,18 @@ async function responderIA_ES(session, texto) {
   // ---------------------------
   // Comandos globales
   // ---------------------------
-  if (esComandoMenu(texto)) {
+  
+  if (esComandoIdioma(texto)) {
+    // Reiniciar selección de idioma (solo capa de UI; no altera derivación)
+    session.lang = null;
+    session.estado = 'LANG_SELECT';
+    session.finalTurns = 0;
+    limpiarEstadoMenu(session);
+    resetContextoDerivacion(session);
+    return { respuestaTexto: textoSeleccionIdioma(), session };
+  }
+
+if (esComandoMenu(texto)) {
     initMenu(session);
     return { respuestaTexto: menuPrincipalTexto(), session };
   }
@@ -844,6 +866,11 @@ También puede escribir *Menú* para volver.`,
       .replace('{resumen_caso}', resumen)
       .replace('{distrito}', distrito);
 
+
+    // ✅ Enlace directo (clickeable) a WhatsApp (sin hardcode; usa knowledge.json)
+    const numeroWa = (op.numero_whatsapp || '').toString().replace(/[^0-9]/g, '');
+    const waLink = numeroWa ? `https://wa.me/${numeroWa}?text=${encodeURIComponent(sugerido)}` : null;
+
     session.estado = 'FINAL';
     session.finalTurns = 0;
     return {
@@ -851,6 +878,7 @@ También puede escribir *Menú* para volver.`,
         `${op.mensaje_inicial || 'Puedo derivarlo con un operador para orientación general.'}\n\n` +
         `📱 *WhatsApp:* +${op.numero_whatsapp}\n` +
         `🕒 *Horario:* ${op.horario || '—'}\n\n` +
+        (waLink ? `👉 *Enlace directo a WhatsApp:*\n${waLink}\n\n` : '') +
         `✍️ *Mensaje sugerido para copiar y pegar:*\n${sugerido}\n\n` +
         `Puede escribir *Menú* para volver.`,
       session

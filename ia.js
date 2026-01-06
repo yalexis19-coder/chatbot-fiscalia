@@ -13,15 +13,75 @@ const knowledge = require('./knowledge.json');
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // ---------------------------
+// Idioma (ES / QU)
+// ---------------------------
+// ✅ Capa de idioma: no altera la lógica de derivación.
+// - Internamente se procesa en Español.
+// - Si el usuario elige Quechua, se traduce ENTRADA->ES y SALIDA->QU.
+const LANG_ES = 'es';
+const LANG_QU = 'qu';
+
+function textoSeleccionIdioma() {
+  return (
+`🌐 *Elija el idioma / Akllay simita:*
+
+1️⃣ Español
+2️⃣ Quechua (Runasimi)
+
+Responda con *1* o *2*.`
+  );
+}
+
+function detectarSeleccionIdioma(texto) {
+  const t = normalize(texto);
+  if (!t) return null;
+  if (t === '1' || t === 'es' || t === 'espanol' || t === 'español' || t === 'castellano') return LANG_ES;
+  if (t === '2' || t === 'qu' || t === 'quechua' || t === 'runasimi' || t === 'qichwa') return LANG_QU;
+  return null;
+}
+
+async function traducirTexto({ texto, targetLang }) {
+  // targetLang: 'es' | 'qu'
+  if (!texto) return texto;
+  if (targetLang !== LANG_ES && targetLang !== LANG_QU) return texto;
+
+  const system = (
+    targetLang === LANG_QU
+      ? `Traduce el texto del español al quechua (runasimi) en un tono institucional y claro.
+Reglas obligatorias:
+- Conserva EXACTAMENTE (sin traducir ni modificar) nombres propios, nombres de fiscalías, distritos, provincias, direcciones, teléfonos, horarios, códigos y enlaces (http/https/wa.me).
+- Conserva el formato (saltos de línea, viñetas, emojis, negritas con *).
+- Devuelve SOLO la traducción final, sin explicaciones.`
+      : `Traduce el texto del quechua (runasimi) al español, manteniendo un tono institucional y claro.
+Reglas obligatorias:
+- Conserva EXACTAMENTE (sin traducir ni modificar) nombres propios, nombres de fiscalías, distritos, provincias, direcciones, teléfonos, horarios, códigos y enlaces (http/https/wa.me).
+- Conserva el formato (saltos de línea, viñetas, emojis, negritas con *).
+- Devuelve SOLO la traducción final, sin explicaciones.`
+  );
+
+  const res = await openai.chat.completions.create({
+    model: 'gpt-4o-mini',
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: texto }
+    ],
+    temperature: 0.2
+  });
+
+  return (res.choices?.[0]?.message?.content || '').trim() || texto;
+}
+
+// ---------------------------
 // Utilitarios
 // ---------------------------
-const normalize = (str) =>
-  (str || '')
+function normalize(str) {
+  return (str || '')
     .toString()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .trim();
+}
 
 function levenshtein(a, b) {
   a = normalize(a);
@@ -502,7 +562,7 @@ Reglas:
 // ---------------------------
 // Flujo principal
 // ---------------------------
-async function responderIA(session, texto) {
+async function responderIA_ES(session, texto) {
   if (!session) session = {};
   if (!session.contexto) {
     resetContextoDerivacion(session);
@@ -843,7 +903,7 @@ También puede escribir *Menú* para volver.`,
       limpiarEstadoMenu(session);
 
       if (normalize(textoLimpio).length > 10) {
-        return responderIA(session, textoLimpio);
+        return responderIA_ES(session, textoLimpio);
       }
       return {
         respuestaTexto:
@@ -856,8 +916,8 @@ También puede escribir *Menú* para volver.`,
     const opt = detectarOpcionMenuPrincipal(texto);
     if (opt === 'UBICACION') { session.estado = 'MENU_UBICACION'; session.menu = null; return { respuestaTexto: 'Indique el *distrito* o el *nombre/código* de la fiscalía que desea ubicar.', session }; }
     if (opt === 'FAQ') { session.estado = 'MENU_FAQ'; session.menu = null; const faqs = knowledge?.faq || []; const listado = (faqs || []).slice(0, 10).map((x,i)=>`${i+1}) ${x.pregunta}`).join('\n'); return { respuestaTexto: `📚 *FAQ*\n${listado}\n\nResponda con el número o una palabra clave.`, session }; }
-    if (opt === 'CONTACTO') { session.estado = 'MENU_CONTACTO'; session.menu = { tipo:'CONTACTO', page:0 }; return responderIA(session, ''); }
-    if (opt === 'OPERADOR') { session.estado = 'MENU_OPERADOR'; return responderIA(session, texto); }
+    if (opt === 'CONTACTO') { session.estado = 'MENU_CONTACTO'; session.menu = { tipo:'CONTACTO', page:0 }; return responderIA_ES(session, ''); }
+    if (opt === 'OPERADOR') { session.estado = 'MENU_OPERADOR'; return responderIA_ES(session, texto); }
 
     session.finalTurns += 1;
     if (session.finalTurns === 1) {
@@ -922,12 +982,12 @@ También puede escribir *Menú* para volver.`,
       if (opt === 'CONTACTO') {
         session.estado = 'MENU_CONTACTO';
         session.menu = { tipo: 'CONTACTO', page: 0 };
-        return responderIA(session, '');
+        return responderIA_ES(session, '');
       }
 
       if (opt === 'OPERADOR') {
         session.estado = 'MENU_OPERADOR';
-        return responderIA(session, texto);
+        return responderIA_ES(session, texto);
       }
     }
 
@@ -940,7 +1000,7 @@ También puede escribir *Menú* para volver.`,
       limpiarEstadoMenu(session);
 
       if (normalize(textoLimpio).length > 10) {
-        return responderIA(session, textoLimpio);
+        return responderIA_ES(session, textoLimpio);
       }
       return {
         respuestaTexto:
@@ -1141,7 +1201,7 @@ También puede escribir *Menú* para volver.`,
     }
 
     session.estado = 'DERIVACION';
-    return responderIA(session, session.contexto.distritoTexto);
+    return responderIA_ES(session, session.contexto.distritoTexto);
   }
 
   // ---------------------------
@@ -1155,12 +1215,55 @@ También puede escribir *Menú* para volver.`,
     session.estado = 'DERIVACION';
 
     // volver a derivar sin usar "sí/no" como distrito
-    return responderIA(session, session.contexto.distritoTexto || '');
+    return responderIA_ES(session, session.contexto.distritoTexto || '');
   }
 
   // fallback
   initMenu(session);
   return { respuestaTexto: menuPrincipalTexto(), session };
+}
+
+// ---------------------------
+// Wrapper con selección de idioma (ES / QU)
+// ---------------------------
+async function responderIA(session, texto) {
+  if (!session) session = {};
+  if (!session.contexto) resetContextoDerivacion(session);
+  if (!session.estado) session.estado = 'LANG_SELECT';
+
+  // 1) Selector de idioma (primera interacción)
+  if (!session.lang) {
+    const sel = detectarSeleccionIdioma(texto);
+    if (sel) {
+      session.lang = sel;
+      initMenu(session);
+      // Mostrar menú ya en el idioma elegido
+      if (session.lang === LANG_QU) {
+        const menuQu = await traducirTexto({ texto: menuPrincipalTexto(), targetLang: LANG_QU });
+        return { respuestaTexto: menuQu, session };
+      }
+      return { respuestaTexto: menuPrincipalTexto(), session };
+    }
+    // Si aún no elige idioma, mostrar selector
+    session.estado = 'LANG_SELECT';
+    return { respuestaTexto: textoSeleccionIdioma(), session };
+  }
+
+  // 2) Traducir ENTRADA si el usuario está en Quechua
+  let textoInterno = texto;
+  if (session.lang === LANG_QU) {
+    textoInterno = await traducirTexto({ texto, targetLang: LANG_ES });
+  }
+
+  // 3) Ejecutar lógica principal (ES)
+  const res = await responderIA_ES(session, textoInterno);
+
+  // 4) Traducir SALIDA si corresponde
+  if (session.lang === LANG_QU && res?.respuestaTexto) {
+    const outQu = await traducirTexto({ texto: res.respuestaTexto, targetLang: LANG_QU });
+    return { respuestaTexto: outQu, session: res.session || session };
+  }
+  return res;
 }
 
 module.exports = { responderIA };

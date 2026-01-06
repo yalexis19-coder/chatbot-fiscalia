@@ -1,6 +1,10 @@
 // ia.js
 // Lógica principal de IA – Ministerio Público (Fiscalía de Cajamarca)
 // FUNCIÓN 1: Derivación a fiscalía competente (materia + distrito + vínculo si aplica)
+//
+// ✅ IMPORTANTE (proyecto):
+// - La lógica principal de derivación (Competencias + ReglasCompetencia + distrito + vínculo) NO se modifica.
+// - En esta etapa solo se añade/ajusta UX: menú, textos, opciones informativas (FAQ/Contacto/Ubicación/Operador).
 
 const OpenAI = require('openai');
 const { resolverFiscalia } = require('./derivacion');
@@ -39,6 +43,21 @@ function levenshtein(a, b) {
     }
   }
   return dp[m][n];
+}
+
+function bestFuzzyMatch(candidates, input, maxDist = 2) {
+  const t = normalize(input);
+  if (!t) return null;
+  let best = null;
+  for (const c of candidates) {
+    const d = levenshtein(t, c);
+    if (d <= maxDist && (!best || d < best.d)) best = { v: c, d };
+  }
+  return best ? best.v : null;
+}
+
+function isBlank(v) {
+  return v === null || v === undefined || normalize(v) === '';
 }
 
 function esSaludo(texto) {
@@ -98,7 +117,7 @@ function sugiereAgresorDesconocido(texto) {
 
 function esComandoMenu(texto) {
   const t = normalize(texto);
-  return t === 'menu' || t === 'menú' || t === 'inicio';
+  return t === 'menu' || t === 'menú' || t === 'inicio' || t === 'home';
 }
 
 function esComandoDocumentos(texto) {
@@ -131,6 +150,137 @@ function textoSugiereDenunciaPenal(texto) {
 function pareceRelato(texto) {
   const toks = tokensUtiles(texto);
   return toks.length >= 5 || normalize(texto).length >= 25 || textoSugiereDenunciaPenal(texto) || pareceCasoFamilia(texto);
+}
+
+// ---------------------------
+// MENÚ (UX) – conectado a knowledge.json (sin hardcode de reglas de derivación)
+// ---------------------------
+function menuPrincipalTexto() {
+  return (
+`👋 *Ministerio Público – Distrito Fiscal de Cajamarca*
+Seleccione una opción (escriba el número o el nombre):
+
+1️⃣ *Presentar denuncia* (orientación por delito y distrito)
+2️⃣ *Ubicación de una fiscalía* (dirección / teléfono / horario)
+3️⃣ *FAQ* (preguntas frecuentes)
+4️⃣ *Datos de contacto* (entidades y líneas útiles)
+5️⃣ *Hablar con operador* (WhatsApp)
+
+Puede escribir *Menú* en cualquier momento para volver aquí.`
+  );
+}
+
+function detectarOpcionMenuPrincipal(texto) {
+  const t = normalize(texto);
+  if (!t) return null;
+
+  const map = {
+    '1': 'DENUNCIA',
+    'denuncia': 'DENUNCIA',
+    'presentar denuncia': 'DENUNCIA',
+    '2': 'UBICACION',
+    'ubicacion': 'UBICACION',
+    'ubicación': 'UBICACION',
+    'fiscalia': 'UBICACION',
+    'fiscalía': 'UBICACION',
+    'direccion': 'UBICACION',
+    'dirección': 'UBICACION',
+    '3': 'FAQ',
+    'faq': 'FAQ',
+    'preguntas': 'FAQ',
+    'preguntas frecuentes': 'FAQ',
+    '4': 'CONTACTO',
+    'contacto': 'CONTACTO',
+    'datos de contacto': 'CONTACTO',
+    'telefonos': 'CONTACTO',
+    'teléfonos': 'CONTACTO',
+    '5': 'OPERADOR',
+    'operador': 'OPERADOR',
+    'whatsapp': 'OPERADOR',
+    'hablar con operador': 'OPERADOR',
+  };
+
+  if (map[t]) return map[t];
+
+  // tolerancia: si escribe "2 ubicacion", "3 faq", etc.
+  if (t.startsWith('1')) return 'DENUNCIA';
+  if (t.startsWith('2')) return 'UBICACION';
+  if (t.startsWith('3')) return 'FAQ';
+  if (t.startsWith('4')) return 'CONTACTO';
+  if (t.startsWith('5')) return 'OPERADOR';
+
+  return null;
+}
+
+function resetContextoDerivacion(session) {
+  session.contexto = {
+    distritoTexto: null,
+    delitoEspecifico: null,
+    materiaDetectada: null,
+    vinculoRespuesta: null
+  };
+}
+
+function limpiarEstadoMenu(session) {
+  delete session.menu;
+}
+
+function initMenu(session) {
+  session.estado = 'INICIO';
+  session.finalTurns = 0;
+  resetContextoDerivacion(session);
+  limpiarEstadoMenu(session);
+}
+
+// --- Ubicación: resolver fiscalía por nombre/código o por distrito ---
+function buscarFiscaliasPorTexto(texto, fiscalias) {
+  const t = normalize(texto);
+  if (!t || !Array.isArray(fiscalias)) return [];
+
+  // match por código exacto (si lo escriben)
+  const exactCodigo = fiscalias.find(f => normalize(f.codigo_fiscalia) === t);
+  if (exactCodigo) return [exactCodigo];
+
+  // match por nombre (contiene)
+  const hits = fiscalias.filter(f => normalize(f.nombre_fiscalia).includes(t));
+  if (hits.length) return hits.slice(0, 5);
+
+  // fuzzy por nombre (para typos leves)
+  const cand = fiscalias.map(f => normalize(f.nombre_fiscalia)).filter(Boolean);
+  const hit = bestFuzzyMatch(cand, t, 2);
+  if (!hit) return [];
+  const row = fiscalias.find(f => normalize(f.nombre_fiscalia) === hit);
+  return row ? [row] : [];
+}
+
+function resolverDistritoRecordMenu(texto) {
+  const { distritos, aliasDistritos } = knowledge || {};
+  let t = normalize(texto);
+  if (!t) return null;
+
+  // alias exacto
+  const aExact = (aliasDistritos || []).find(a => normalize(a.alias) === t);
+  if (aExact) t = normalize(aExact.distrito_destino);
+
+  // match exacto
+  const exact = (distritos || []).find(d => normalize(d.distrito) === t);
+  if (exact) return exact;
+
+  // fuzzy
+  const cand = (distritos || []).map(d => normalize(d.distrito)).filter(Boolean);
+  const hit = bestFuzzyMatch(cand, t, 2);
+  if (!hit) return null;
+  return (distritos || []).find(d => normalize(d.distrito) === hit) || null;
+}
+
+function formatearFichaFiscalia(f) {
+  if (!f) return null;
+  return (
+`📌 *${f.nombre_fiscalia}*
+📍 Dirección: ${f.direccion || '—'}
+☎️ Teléfono: ${f.telefono || '—'}
+🕒 Horario: ${f.horario || '—'}`
+  );
 }
 
 // ---------------------------
@@ -224,53 +374,35 @@ Reglas:
 async function responderIA(session, texto) {
   if (!session) session = {};
   if (!session.contexto) {
-    session.contexto = {
-      distritoTexto: null,
-      delitoEspecifico: null,
-      materiaDetectada: null,
-      vinculoRespuesta: null
-    };
+    resetContextoDerivacion(session);
   }
   if (!session.estado) session.estado = 'INICIO';
   if (typeof session.finalTurns !== 'number') session.finalTurns = 0;
 
-  // Saludo
+  // ---------------------------
+  // Saludo / Inicio
+  // ---------------------------
   if (esSaludo(texto) && (session.estado === 'INICIO' || session.estado === 'FINAL')) {
-    session.estado = 'INICIO';
-    return {
-      respuestaTexto:
-        'Hola 👋 Puedes elegir una opción del menú. Si deseas denunciar, escribe *Denuncia* o cuéntame brevemente qué ocurrió.',
-      session
-    };
+    initMenu(session);
+    return { respuestaTexto: menuPrincipalTexto(), session };
   }
 
+  // ---------------------------
   // Comandos globales
+  // ---------------------------
   if (esComandoMenu(texto)) {
-    session.estado = 'INICIO';
-    session.finalTurns = 0;
-    session.contexto = {
-      distritoTexto: null,
-      delitoEspecifico: null,
-      materiaDetectada: null,
-      vinculoRespuesta: null
-    };
-    return {
-      respuestaTexto:
-        'Hola 👋 Puedes elegir una opción del menú. Si deseas denunciar, escribe *Denuncia* o cuéntame brevemente qué ocurrió.',
-      session
-    };
+    initMenu(session);
+    return { respuestaTexto: menuPrincipalTexto(), session };
   }
 
   if (esComandoOtraConsulta(texto)) {
     session.estado = 'ESPERANDO_RELATO';
     session.finalTurns = 0;
-    session.contexto.distritoTexto = null;
-    session.contexto.delitoEspecifico = null;
-    session.contexto.materiaDetectada = null;
-    session.contexto.vinculoRespuesta = null;
+    resetContextoDerivacion(session);
+    limpiarEstadoMenu(session);
     return {
       respuestaTexto:
-        'Perfecto. Cuéntame, por favor, ¿qué ocurrió? Puedes describir los hechos con tus palabras.',
+        'Perfecto. Cuénteme, por favor, ¿qué ocurrió? Puede describir los hechos con sus palabras.',
       session
     };
   }
@@ -278,46 +410,273 @@ async function responderIA(session, texto) {
   if (esComandoDocumentos(texto)) {
     return {
       respuestaTexto:
-        '📄 **Documentos sugeridos (orientativo):**\n' +
+        '📄 *Documentos sugeridos (orientativo):*\n' +
         '• DNI (si cuenta con él)\n' +
         '• Datos de la persona denunciada (si los conoce)\n' +
         '• Evidencias: fotos, videos, audios, chats, documentos\n' +
         '• Fecha, hora y lugar de los hechos\n\n' +
-        'Si desea, escriba *Menú* para volver al inicio o *Denuncia* para iniciar un nuevo caso.',
+        'Puede escribir *Menú* para volver al inicio o *Denuncia* para iniciar un nuevo caso.',
       session
     };
   }
 
-  // Cierre conversacional
+  // ---------------------------
+  // Estados de MENÚ (FAQ/Contacto/Ubicación/Operador)
+  // ---------------------------
+  if (session.estado === 'MENU_UBICACION') {
+    const fiscalias = knowledge?.fiscalias || [];
+    const distritoRec = resolverDistritoRecordMenu(texto);
+
+    // 1) Si parece distrito => buscar fiscalía penal/mixta del distrito (si existe la columna)
+    if (distritoRec && distritoRec.fiscalia_penal_mixta_codigo) {
+      const f = (fiscalias || []).find(x => normalize(x.codigo_fiscalia) === normalize(distritoRec.fiscalia_penal_mixta_codigo));
+      if (f) {
+        session.estado = 'FINAL';
+        session.finalTurns = 0;
+        return {
+          respuestaTexto:
+            `✅ Distrito: *${distritoRec.distrito}*\n\n` +
+            formatearFichaFiscalia(f) +
+            `\n\nPuede escribir *Menú* para ver otras opciones.`,
+          session
+        };
+      }
+    }
+
+    // 2) Buscar fiscalía por nombre/código
+    const hits = buscarFiscaliasPorTexto(texto, fiscalias);
+    if (hits.length === 1) {
+      session.estado = 'FINAL';
+      session.finalTurns = 0;
+      return {
+        respuestaTexto:
+          formatearFichaFiscalia(hits[0]) +
+          `\n\nPuede escribir *Menú* para ver otras opciones.`,
+        session
+      };
+    }
+    if (hits.length > 1) {
+      const listado = hits.map((f, i) => `${i + 1}) ${f.nombre_fiscalia}`).join('\n');
+      session.menu = { tipo: 'UBICACION_LISTA', hits };
+      return {
+        respuestaTexto:
+          `Encontré varias coincidencias. Responda con el número para ver la ubicación:\n${listado}\n\nO escriba otro nombre/distrito.`,
+        session
+      };
+    }
+
+    return {
+      respuestaTexto:
+        'No encontré esa fiscalía/distrito. Puede escribir:\n' +
+        '• el *nombre* de la fiscalía (ej.: “Fiscalía Provincial Penal…”) o\n' +
+        '• el *distrito* (ej.: “Baños del Inca”).\n\n' +
+        'También puede escribir *Menú* para volver.',
+      session
+    };
+  }
+
+  if (session.menu?.tipo === 'UBICACION_LISTA' && session.estado === 'MENU_UBICACION') {
+    // (este bloque queda por claridad; el flujo real se maneja arriba)
+  }
+
+  if (session.estado === 'MENU_FAQ') {
+    const faqs = knowledge?.faq || [];
+    if (!Array.isArray(faqs) || faqs.length === 0) {
+      initMenu(session);
+      return {
+        respuestaTexto:
+          'Por el momento no tengo cargada la sección de FAQ en la base de conocimiento.\n\n' +
+          menuPrincipalTexto(),
+        session
+      };
+    }
+
+    const t = normalize(texto);
+
+    // seleccionar por número
+    const n = parseInt(t, 10);
+    if (!Number.isNaN(n) && n >= 1 && n <= faqs.length) {
+      const item = faqs[n - 1];
+      return {
+        respuestaTexto:
+          `❓ *${item.pregunta}*\n\n${item.respuesta}\n\n` +
+          'Escriba otro número para otra pregunta, o *Menú* para volver.',
+        session
+      };
+    }
+
+    // búsqueda por palabra clave
+    const hits = faqs
+      .map((x, idx) => ({ idx, p: x.pregunta || '', r: x.respuesta || '' }))
+      .filter(x => normalize(x.p).includes(t) || normalize(x.r).includes(t))
+      .slice(0, 5);
+
+    if (hits.length) {
+      const listado = hits.map((h, i) => `${i + 1}) ${faqs[h.idx].pregunta}`).join('\n');
+      session.menu = { tipo: 'FAQ_HITS', hits };
+      return {
+        respuestaTexto:
+          `Encontré estas preguntas relacionadas. Responda con el número:\n${listado}\n\n` +
+          'O escriba otra palabra clave, o *Menú* para volver.',
+        session
+      };
+    }
+
+    return {
+      respuestaTexto:
+        'Escriba el *número* de la pregunta o una *palabra clave* (ej.: “pruebas”, “gratuita”, “turno”).\n\n' +
+        'Escriba *Menú* para volver.',
+      session
+    };
+  }
+
+  if (session.estado === 'MENU_CONTACTO') {
+    const contactos = knowledge?.contacto || [];
+    if (!Array.isArray(contactos) || contactos.length === 0) {
+      initMenu(session);
+      return {
+        respuestaTexto:
+          'Por el momento no tengo cargada la sección de contactos en la base de conocimiento.\n\n' +
+          menuPrincipalTexto(),
+        session
+      };
+    }
+
+    // paginado simple
+    if (!session.menu) session.menu = { tipo: 'CONTACTO', page: 0 };
+    const t = normalize(texto);
+    if (t === 'mas' || t === 'más' || t === 'siguiente') session.menu.page += 1;
+    if (t === 'atras' || t === 'atrás' || t === 'anterior') session.menu.page = Math.max(0, session.menu.page - 1);
+
+    const pageSize = 5;
+    const start = session.menu.page * pageSize;
+    const slice = contactos.slice(start, start + pageSize);
+
+    if (!slice.length) {
+      session.menu.page = 0;
+      return {
+        respuestaTexto:
+          'No hay más resultados. Escriba *Más* para continuar (si corresponde) o *Menú* para volver.',
+        session
+      };
+    }
+
+    const lines = slice.map((c, i) =>
+      `• *${c.entidad || '—'}*\n  📍 ${c.direccion || '—'}\n  ☎️ ${c.telefono || '—'}\n  ✉️ ${c.correo || '—'}`
+    ).join('\n\n');
+
+    const hayMas = (start + pageSize) < contactos.length;
+    return {
+      respuestaTexto:
+        `📞 *Contactos útiles (página ${session.menu.page + 1})*\n\n${lines}\n\n` +
+        (hayMas ? 'Escriba *Más* para ver más contactos, o *Menú* para volver.' : 'Escriba *Menú* para volver.'),
+      session
+    };
+  }
+
+  if (session.estado === 'MENU_OPERADOR') {
+    const ops = knowledge?.operadores || [];
+    const op = Array.isArray(ops) ? ops.find(o => normalize(o.activo) === 'si') : null;
+
+    if (!op) {
+      initMenu(session);
+      return {
+        respuestaTexto:
+          'Por el momento no tengo configurado un operador en la base de conocimiento.\n\n' +
+          menuPrincipalTexto(),
+        session
+      };
+    }
+
+    // Armar un mensaje sugerido (sin URL directa)
+    const distrito = session.contexto?.distritoTexto || '—';
+    const resumen = session.contexto?.delitoEspecifico ? `Delito probable: ${session.contexto.delitoEspecifico}` : (session.contexto?.materiaDetectada ? `Materia: ${session.contexto.materiaDetectada}` : 'Consulta general');
+    const sugerido = (op.mensaje_prellenado || 'Hola, solicito orientación general. Mi caso es: {resumen_caso}. Distrito: {distrito}.')
+      .replace('{resumen_caso}', resumen)
+      .replace('{distrito}', distrito);
+
+    session.estado = 'FINAL';
+    session.finalTurns = 0;
+    return {
+      respuestaTexto:
+        `${op.mensaje_inicial || 'Puedo derivarlo con un operador para orientación general.'}\n\n` +
+        `📱 *WhatsApp:* +${op.numero_whatsapp}\n` +
+        `🕒 *Horario:* ${op.horario || '—'}\n\n` +
+        `✍️ *Mensaje sugerido para copiar y pegar:*\n${sugerido}\n\n` +
+        `Puede escribir *Menú* para volver.`,
+      session
+    };
+  }
+
+  // Resolver selección dentro de listas (FAQ_HITS / UBICACION_LISTA)
+  if (session.menu?.tipo === 'FAQ_HITS' && session.estado === 'MENU_FAQ') {
+    const t = normalize(texto);
+    const n = parseInt(t, 10);
+    if (!Number.isNaN(n) && n >= 1 && n <= session.menu.hits.length) {
+      const faqs = knowledge?.faq || [];
+      const idx = session.menu.hits[n - 1].idx;
+      const item = faqs[idx];
+      return {
+        respuestaTexto:
+          `❓ *${item.pregunta}*\n\n${item.respuesta}\n\n` +
+          'Escriba otro número/palabra clave, o *Menú* para volver.',
+        session
+      };
+    }
+  }
+
+  if (session.menu?.tipo === 'UBICACION_LISTA' && session.estado === 'MENU_UBICACION') {
+    const t = normalize(texto);
+    const n = parseInt(t, 10);
+    if (!Number.isNaN(n) && n >= 1 && n <= session.menu.hits.length) {
+      const f = session.menu.hits[n - 1];
+      session.estado = 'FINAL';
+      session.finalTurns = 0;
+      return {
+        respuestaTexto:
+          formatearFichaFiscalia(f) +
+          `\n\nPuede escribir *Menú* para ver otras opciones.`,
+        session
+      };
+    }
+  }
+
+  // ---------------------------
+  // Cierre conversacional (sin tocar lógica de derivación)
+  // ---------------------------
   if (session.estado === 'FINAL') {
     // ✅ Si escribe "Denuncia" en cierre, iniciar nuevo caso
     if (esInicioDenuncia(texto)) {
       const textoLimpio = (texto || '').replace(/denuncia(r)?/ig, '').trim();
       session.estado = 'ESPERANDO_RELATO';
       session.finalTurns = 0;
-      session.contexto.distritoTexto = null;
-      session.contexto.delitoEspecifico = null;
-      session.contexto.materiaDetectada = null;
-      session.contexto.vinculoRespuesta = null;
+      resetContextoDerivacion(session);
+      limpiarEstadoMenu(session);
 
       if (normalize(textoLimpio).length > 10) {
         return responderIA(session, textoLimpio);
       }
       return {
         respuestaTexto:
-          'Perfecto. Cuéntame, por favor, ¿qué ocurrió? Puedes describir los hechos con tus palabras.',
+          'Perfecto. Cuénteme, por favor, ¿qué ocurrió? Puede describir los hechos con sus palabras.',
         session
       };
     }
+
+    // Si en cierre piden operador/faq/contacto/ubicación, permitirlo como atajo
+    const opt = detectarOpcionMenuPrincipal(texto);
+    if (opt === 'UBICACION') { session.estado = 'MENU_UBICACION'; session.menu = null; return { respuestaTexto: 'Indique el *distrito* o el *nombre/código* de la fiscalía que desea ubicar.', session }; }
+    if (opt === 'FAQ') { session.estado = 'MENU_FAQ'; session.menu = null; const faqs = knowledge?.faq || []; const listado = (faqs || []).slice(0, 10).map((x,i)=>`${i+1}) ${x.pregunta}`).join('\n'); return { respuestaTexto: `📚 *FAQ*\n${listado}\n\nResponda con el número o una palabra clave.`, session }; }
+    if (opt === 'CONTACTO') { session.estado = 'MENU_CONTACTO'; session.menu = { tipo:'CONTACTO', page:0 }; return responderIA(session, ''); }
+    if (opt === 'OPERADOR') { session.estado = 'MENU_OPERADOR'; return responderIA(session, texto); }
 
     session.finalTurns += 1;
     if (session.finalTurns === 1) {
       return {
         respuestaTexto:
           'La orientación principal ya fue brindada.\n\nPuede:\n' +
-          '1️⃣ Presentar su denuncia en la fiscalía indicada.\n' +
           '📄 Escribir *Documentos* para saber qué llevar.\n' +
-          '🏠 Escribir *Menú* para volver al inicio.\n' +
+          '🏠 Escribir *Menú* para ver opciones (FAQ / Contacto / Ubicación / Operador).\n' +
           '📝 Escribir *Denuncia* para iniciar un nuevo caso.',
         session
       };
@@ -325,37 +684,94 @@ async function responderIA(session, texto) {
     return { respuestaTexto: 'Para continuar, escriba *Menú* o *Denuncia*.', session };
   }
 
-  // Estado INICIO
+  // ---------------------------
+  // Estado INICIO (MENÚ)
+  // ---------------------------
   if (session.estado === 'INICIO') {
+    // 1) Si el usuario elige opción del menú
+    const opt = detectarOpcionMenuPrincipal(texto);
+    if (opt) {
+      limpiarEstadoMenu(session);
+      if (opt === 'DENUNCIA') {
+        // Mantener flujo actual: iniciar relato
+        session.estado = 'ESPERANDO_RELATO';
+        session.finalTurns = 0;
+        resetContextoDerivacion(session);
+        return {
+          respuestaTexto:
+            'Perfecto. Cuénteme, por favor, ¿qué ocurrió? Puede describir los hechos con sus palabras.',
+          session
+        };
+      }
+
+      if (opt === 'UBICACION') {
+        session.estado = 'MENU_UBICACION';
+        session.menu = null;
+        return {
+          respuestaTexto:
+            'Indique el *distrito* o el *nombre/código* de la fiscalía que desea ubicar.',
+          session
+        };
+      }
+
+      if (opt === 'FAQ') {
+        session.estado = 'MENU_FAQ';
+        session.menu = null;
+        const faqs = knowledge?.faq || [];
+        if (!Array.isArray(faqs) || faqs.length === 0) {
+          initMenu(session);
+          return { respuestaTexto: 'No tengo cargada la sección de FAQ en la base de conocimiento.\n\n' + menuPrincipalTexto(), session };
+        }
+        const listado = faqs.slice(0, 10).map((x, i) => `${i + 1}) ${x.pregunta}`).join('\n');
+        return {
+          respuestaTexto:
+            `📚 *FAQ*\n${listado}\n\nResponda con el número o una palabra clave.`,
+          session
+        };
+      }
+
+      if (opt === 'CONTACTO') {
+        session.estado = 'MENU_CONTACTO';
+        session.menu = { tipo: 'CONTACTO', page: 0 };
+        return responderIA(session, '');
+      }
+
+      if (opt === 'OPERADOR') {
+        session.estado = 'MENU_OPERADOR';
+        return responderIA(session, texto);
+      }
+    }
+
+    // 2) Denuncia por palabra clave
     if (esInicioDenuncia(texto)) {
       const textoLimpio = (texto || '').replace(/denuncia(r)?/ig, '').trim();
       session.estado = 'ESPERANDO_RELATO';
       session.finalTurns = 0;
+      resetContextoDerivacion(session);
+      limpiarEstadoMenu(session);
 
       if (normalize(textoLimpio).length > 10) {
         return responderIA(session, textoLimpio);
       }
-
       return {
         respuestaTexto:
-          'Perfecto. Cuéntame, por favor, ¿qué ocurrió? Puedes describir los hechos con tus palabras.',
+          'Perfecto. Cuénteme, por favor, ¿qué ocurrió? Puede describir los hechos con sus palabras.',
         session
       };
     }
 
-    // Si NO parece relato, no iniciar derivación
+    // 3) Si NO parece relato, mostrar menú (antes decía “solo denuncia”)
     if (!pareceRelato(texto)) {
-      return {
-        respuestaTexto:
-          'Puedo orientarte si deseas **presentar una denuncia**. Escribe *Denuncia* o cuéntame brevemente qué ocurrió (por ejemplo: “me robaron en …”).',
-        session
-      };
+      return { respuestaTexto: menuPrincipalTexto(), session };
     }
 
+    // 4) Si parece relato, pasamos al flujo de denuncia existente
     session.estado = 'ESPERANDO_RELATO';
   }
 
-  // Relato
+  // ---------------------------
+  // Relato (lógica existente – NO se cambia el fondo)
+  // ---------------------------
   if (session.estado === 'ESPERANDO_RELATO') {
     const tRel = normalize(texto);
 
@@ -394,47 +810,38 @@ async function responderIA(session, texto) {
       if (inferido?.materia) {
         session.contexto.materiaDetectada = inferido.materia;
         session.contexto.delitoEspecifico = inferido.delitoEspecifico || null;
-} else {
-  // 2) Fallback IA: cuando no calza con Competencias
-  session.contexto.delitoEspecifico = clasif.delito_especifico || null;
+      } else {
+        // 2) Fallback IA: cuando no calza con Competencias
+        session.contexto.delitoEspecifico = clasif.delito_especifico || null;
 
-  // Si el relato sugiere agresor NO familiar (vecino/desconocido), marcamos NO vínculo y Penal.
-  if (sugiereAgresorDesconocido(texto) || sugiereAgresorNoFamiliar(texto)) {
-    session.contexto.vinculoRespuesta = 'NO';
-    session.contexto.materiaDetectada = 'Penal';
-  } else {
-    // ✅ NO asumir Penal automáticamente.
-    // Si la IA detecta una materia (incluye Familia/Prevencion), la usamos para derivar por ReglasCompetencia.
-    session.contexto.materiaDetectada = clasif.materia || null;
-  }
-}
-
+        // Si el relato sugiere agresor NO familiar (vecino/desconocido), marcamos NO vínculo y Penal.
+        if (sugiereAgresorDesconocido(texto) || sugiereAgresorNoFamiliar(texto)) {
+          session.contexto.vinculoRespuesta = 'NO';
+          session.contexto.materiaDetectada = 'Penal';
+        } else {
+          // ✅ NO asumir Penal automáticamente.
+          // Si la IA detecta una materia (incluye Familia/Prevencion), la usamos para derivar por ReglasCompetencia.
+          session.contexto.materiaDetectada = clasif.materia || null;
+        }
+      }
 
       session.contexto.distritoTexto = clasif.distrito || null;
-// Si no se pudo identificar materia ni por Competencias ni por IA, pedir al ciudadano que elija una materia.
-if (!session.contexto.materiaDetectada) {
-  session.estado = 'ESPERANDO_MATERIA';
-  return {
-    respuestaTexto:
-      'Para orientarle mejor, indique el tipo de caso (puede escribir una opción):\n' +
-      '1) Penal\n' +
-      '2) Violencia\n' +
-      '3) Familia\n' +
-      '4) Prevencion\n' +
-      '5) Materia Ambiental\n' +
-      '6) Corrupción\n' +
-      '7) Crimen Organizado\n' +
-      '8) Derechos Humanos\n' +
-      '9) Extinción de Dominio',
-    session
-  };
-}
 
+      // Si no se pudo identificar materia ni por Competencias ni por IA, pedir al ciudadano que elija una materia.
       if (!session.contexto.materiaDetectada) {
-        session.estado = 'INICIO';
+        session.estado = 'ESPERANDO_MATERIA';
         return {
           respuestaTexto:
-            'Para orientarle, por favor describa brevemente qué ocurrió (por ejemplo: “me robaron”, “me amenazaron”, “violencia familiar”, “caso ambiental”, etc.).',
+            'Para orientarle mejor, indique el tipo de caso (puede escribir una opción):\n' +
+            '1) Penal\n' +
+            '2) Violencia\n' +
+            '3) Familia\n' +
+            '4) Prevencion\n' +
+            '5) Materia Ambiental\n' +
+            '6) Corrupción\n' +
+            '7) Crimen Organizado\n' +
+            '8) Derechos Humanos\n' +
+            '9) Extinción de Dominio',
           session
         };
       }
@@ -443,15 +850,13 @@ if (!session.contexto.materiaDetectada) {
     }
   }
 
-  // Derivación / distrito
+  // ---------------------------
+  // Derivación / distrito (lógica existente – NO se cambia)
+  // ---------------------------
   if (session.estado === 'DERIVACION' || session.estado === 'ESPERANDO_DISTRITO') {
     if (!session.contexto.materiaDetectada) {
       session.estado = 'INICIO';
-      return {
-        respuestaTexto:
-          'Para orientarle, por favor cuénteme brevemente qué ocurrió o escriba *Denuncia* para iniciar.',
-        session
-      };
+      return { respuestaTexto: menuPrincipalTexto(), session };
     }
 
     // Si ya estamos esperando distrito, tomar la respuesta como distrito y continuar
@@ -495,63 +900,64 @@ if (!session.contexto.materiaDetectada) {
     };
   }
 
-// ---------------------------
-// Materia (cuando no se pudo inferir)
-// ---------------------------
-if (session.estado === 'ESPERANDO_MATERIA') {
-  const t = normalize(texto);
-  const map = {
-    '1': 'Penal',
-    'penal': 'Penal',
-    '2': 'Violencia',
-    'violencia': 'Violencia',
-    'violencia familiar': 'Violencia',
-    '3': 'Familia',
-    'familia': 'Familia',
-    '4': 'Prevencion',
-    'prevencion': 'Prevencion',
-    'prevención': 'Prevencion',
-    '5': 'Materia Ambiental',
-    'ambiental': 'Materia Ambiental',
-    'materia ambiental': 'Materia Ambiental',
-    '6': 'Corrupción',
-    'corrupcion': 'Corrupción',
-    'corrupción': 'Corrupción',
-    '7': 'Crimen Organizado',
-    'crimen organizado': 'Crimen Organizado',
-    '8': 'Derechos Humanos',
-    'derechos humanos': 'Derechos Humanos',
-    '9': 'Extinción de Dominio',
-    'extincion de dominio': 'Extinción de Dominio',
-    'extinción de dominio': 'Extinción de Dominio'
-  };
-
-  const materiaSel = map[t] || null;
-  if (!materiaSel) {
-    return {
-      respuestaTexto:
-        'Por favor, escriba una de estas opciones: Penal, Violencia, Familia, Prevencion, Materia Ambiental, Corrupción, Crimen Organizado, Derechos Humanos, Extinción de Dominio.',
-      session
+  // ---------------------------
+  // Materia (cuando no se pudo inferir) – lógica existente
+  // ---------------------------
+  if (session.estado === 'ESPERANDO_MATERIA') {
+    const t = normalize(texto);
+    const map = {
+      '1': 'Penal',
+      'penal': 'Penal',
+      '2': 'Violencia',
+      'violencia': 'Violencia',
+      'violencia familiar': 'Violencia',
+      '3': 'Familia',
+      'familia': 'Familia',
+      '4': 'Prevencion',
+      'prevencion': 'Prevencion',
+      'prevención': 'Prevencion',
+      '5': 'Materia Ambiental',
+      'ambiental': 'Materia Ambiental',
+      'materia ambiental': 'Materia Ambiental',
+      '6': 'Corrupción',
+      'corrupcion': 'Corrupción',
+      'corrupción': 'Corrupción',
+      '7': 'Crimen Organizado',
+      'crimen organizado': 'Crimen Organizado',
+      '8': 'Derechos Humanos',
+      'derechos humanos': 'Derechos Humanos',
+      '9': 'Extinción de Dominio',
+      'extincion de dominio': 'Extinción de Dominio',
+      'extinción de dominio': 'Extinción de Dominio'
     };
+
+    const materiaSel = map[t] || null;
+    if (!materiaSel) {
+      return {
+        respuestaTexto:
+          'Por favor, escriba una de estas opciones: Penal, Violencia, Familia, Prevencion, Materia Ambiental, Corrupción, Crimen Organizado, Derechos Humanos, Extinción de Dominio.',
+        session
+      };
+    }
+
+    session.contexto.materiaDetectada = materiaSel;
+
+    if (!session.contexto.distritoTexto) {
+      session.estado = 'ESPERANDO_DISTRITO';
+      return {
+        respuestaTexto:
+          'Gracias. Ahora indíqueme en qué distrito ocurrieron los hechos.',
+        session
+      };
+    }
+
+    session.estado = 'DERIVACION';
+    return responderIA(session, session.contexto.distritoTexto);
   }
 
-  session.contexto.materiaDetectada = materiaSel;
-
-  if (!session.contexto.distritoTexto) {
-    session.estado = 'ESPERANDO_DISTRITO';
-    return {
-      respuestaTexto:
-        'Gracias. Ahora indíqueme en qué distrito ocurrieron los hechos.',
-      session
-    };
-  }
-
-  session.estado = 'DERIVACION';
-  return responderIA(session, session.contexto.distritoTexto);
-}
-
-
-  // Vínculo
+  // ---------------------------
+  // Vínculo – lógica existente
+  // ---------------------------
   if (session.estado === 'ESPERANDO_VINCULO') {
     const resp = esRespuestaSiNo(texto);
     if (!resp) return { respuestaTexto: 'Por favor responda solo "sí" o "no".', session };
@@ -563,11 +969,9 @@ if (session.estado === 'ESPERANDO_MATERIA') {
     return responderIA(session, session.contexto.distritoTexto || '');
   }
 
-  return {
-    respuestaTexto:
-      'Hola 👋 Puedes elegir una opción del menú. Si deseas denunciar, escribe *Denuncia* o cuéntame brevemente qué ocurrió.',
-    session
-  };
+  // fallback
+  initMenu(session);
+  return { respuestaTexto: menuPrincipalTexto(), session };
 }
 
 module.exports = { responderIA };

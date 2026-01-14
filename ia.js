@@ -201,6 +201,61 @@ function esComandoOtraConsulta(texto) {
   return t === 'otra consulta' || t === 'nuevo caso' || t === 'nuevo' || t === 'reiniciar';
 }
 
+
+function esComandoCancelar(texto) {
+  const t = normalize(texto);
+  return (
+    t === 'cancelar' ||
+    t === 'cancel' ||
+    t === 'salir' ||
+    t === 'terminar' ||
+    t === 'reset' ||
+    t === 'reiniciar todo'
+  );
+}
+
+// ---------------------------
+// Guard de bucles (UX)
+// - Si el usuario falla 3 veces seguidas en un mismo estado de selección,
+//   se cancela el flujo y se vuelve al menú.
+// ---------------------------
+function initFailGuard(session) {
+  if (!session.failGuard) session.failGuard = { estado: null, count: 0 };
+}
+
+function resetFailGuard(session) {
+  initFailGuard(session);
+  session.failGuard.estado = null;
+  session.failGuard.count = 0;
+}
+
+function invalidAttempt(session, estadoActual) {
+  initFailGuard(session);
+  if (session.failGuard.estado === estadoActual) {
+    session.failGuard.count += 1;
+  } else {
+    session.failGuard.estado = estadoActual;
+    session.failGuard.count = 1;
+  }
+  return session.failGuard.count;
+}
+
+function cancelarPorBucle(session) {
+  // No altera reglas de derivación. Solo reinicia UX.
+  resetContextoDerivacion(session);
+  limpiarEstadoMenu(session);
+  initMenu(session);
+  session.estado = 'INICIO';
+  session.finalTurns = 0;
+  resetFailGuard(session);
+  return {
+    respuestaTexto:
+      'Listo. He cancelado el flujo actual para evitar un bucle.\n\n' +
+      menuPrincipalTexto(),
+    session
+  };
+}
+
 function esInicioDenuncia(texto) {
   const t = normalize(texto);
   if (!t) return false;
@@ -592,20 +647,14 @@ async function responderIA_ES(session, texto) {
   // ---------------------------
   // Comandos globales
   // ---------------------------
-  
-  if (esComandoIdioma(texto)) {
-    // Reiniciar selección de idioma (solo capa de UI; no altera derivación)
-    session.lang = null;
-    session.estado = 'LANG_SELECT';
-    session.finalTurns = 0;
-    limpiarEstadoMenu(session);
-    resetContextoDerivacion(session);
-    return { respuestaTexto: textoSeleccionIdioma(), session };
-  }
 
 if (esComandoMenu(texto)) {
     initMenu(session);
     return { respuestaTexto: menuPrincipalTexto(), session };
+  }
+
+  if (esComandoCancelar(texto)) {
+    return cancelarPorBucle(session);
   }
 
   if (esComandoOtraConsulta(texto)) {
@@ -649,10 +698,22 @@ if (esComandoMenu(texto)) {
         session.menu = null;
         session.estado = 'FINAL';
         session.finalTurns = 0;
+        resetFailGuard(session);
         return {
           respuestaTexto:
             formatearFichaFiscalia(f) +
             `\n\nPuede escribir *Menú* para ver otras opciones.`,
+          session
+        };
+      }
+
+      // Si estaba eligiendo de una lista y respondió algo inválido (ej. 9, 0, texto corto), evitar bucle:
+      const esNumero = /^\d+$/.test(t);
+      if (esNumero) {
+        const c = invalidAttempt(session, 'UBICACION_LISTA');
+        if (c >= 3) return cancelarPorBucle(session);
+        return {
+          respuestaTexto: `Responda con un número válido (1–${session.menu.hits.length}). Intentos: ${c}/3. (Puede escribir *Cancelar*)`,
           session
         };
       }
@@ -911,10 +972,22 @@ También puede escribir *Menú* para volver.`,
       const faqs = knowledge?.faq || [];
       const idx = session.menu.hits[n - 1].idx;
       const item = faqs[idx];
+      resetFailGuard(session);
       return {
         respuestaTexto:
           `❓ *${item.pregunta}*\n\n${item.respuesta}\n\n` +
           'Escriba otro número/palabra clave, o *Menú* para volver.',
+        session
+      };
+    }
+
+    // Si estaba eligiendo de una lista y respondió algo inválido, evitar bucle:
+    const esNumero = /^\d+$/.test(t);
+    if (esNumero) {
+      const c = invalidAttempt(session, 'FAQ_HITS');
+      if (c >= 3) return cancelarPorBucle(session);
+      return {
+        respuestaTexto: `Responda con un número válido (1–${session.menu.hits.length}). Intentos: ${c}/3. (Puede escribir *Cancelar*)`,
         session
       };
     }
@@ -1228,14 +1301,18 @@ También puede escribir *Menú* para volver.`,
 
     const materiaSel = map[t] || null;
     if (!materiaSel) {
+      const c = invalidAttempt(session, 'ESPERANDO_MATERIA');
+      if (c >= 3) return cancelarPorBucle(session);
       return {
         respuestaTexto:
-          'Por favor, escriba una de estas opciones: Penal, Violencia, Familia, Prevencion, Materia Ambiental, Corrupción, Crimen Organizado, Derechos Humanos, Extinción de Dominio.',
+          'Por favor, escriba una opción válida (1–9) o el nombre de la materia (ej.: Penal, Violencia, Familia).\n' +
+          `Intentos: ${c}/3. (Puede escribir *Cancelar* para volver al menú).`,
         session
       };
     }
 
     session.contexto.materiaDetectada = materiaSel;
+    resetFailGuard(session);
 
     if (!session.contexto.distritoTexto) {
       session.estado = 'ESPERANDO_DISTRITO';
@@ -1255,9 +1332,14 @@ También puede escribir *Menú* para volver.`,
   // ---------------------------
   if (session.estado === 'ESPERANDO_VINCULO') {
     const resp = esRespuestaSiNo(texto);
-    if (!resp) return { respuestaTexto: 'Por favor responda solo "sí" o "no".', session };
+    if (!resp) {
+      const c = invalidAttempt(session, 'ESPERANDO_VINCULO');
+      if (c >= 3) return cancelarPorBucle(session);
+      return { respuestaTexto: `Por favor responda solo "sí" o "no". Intentos: ${c}/3. (Puede escribir *Cancelar*)`, session };
+    }
 
     session.contexto.vinculoRespuesta = resp;
+    resetFailGuard(session);
     session.estado = 'DERIVACION';
 
     // volver a derivar sin usar "sí/no" como distrito
@@ -1272,44 +1354,19 @@ También puede escribir *Menú* para volver.`,
 // ---------------------------
 // Wrapper con selección de idioma (ES / QU)
 // ---------------------------
+// ---------------------------
+// Wrapper – SOLO ESPAÑOL (por ahora)
+// ---------------------------
+// ✅ Se desactiva temporalmente Quechua hasta terminar su desarrollo.
+// - No se muestra selector de idioma.
+// - No se traduce entrada/salida.
+// - La lógica principal (responderIA_ES) se mantiene intacta.
 async function responderIA(session, texto) {
   if (!session) session = {};
-  if (!session.contexto) resetContextoDerivacion(session);
-  if (!session.estado) session.estado = 'LANG_SELECT';
-
-  // 1) Selector de idioma (primera interacción)
-  if (!session.lang) {
-    const sel = detectarSeleccionIdioma(texto);
-    if (sel) {
-      session.lang = sel;
-      initMenu(session);
-      // Mostrar menú ya en el idioma elegido
-      if (session.lang === LANG_QU) {
-        const menuQu = await traducirTexto({ texto: menuPrincipalTexto(), targetLang: LANG_QU });
-        return { respuestaTexto: menuQu, session };
-      }
-      return { respuestaTexto: menuPrincipalTexto(), session };
-    }
-    // Si aún no elige idioma, mostrar selector
-    session.estado = 'LANG_SELECT';
-    return { respuestaTexto: textoSeleccionIdioma(), session };
-  }
-
-  // 2) Traducir ENTRADA si el usuario está en Quechua
-  let textoInterno = texto;
-  if (session.lang === LANG_QU) {
-    textoInterno = await traducirTexto({ texto, targetLang: LANG_ES });
-  }
-
-  // 3) Ejecutar lógica principal (ES)
-  const res = await responderIA_ES(session, textoInterno);
-
-  // 4) Traducir SALIDA si corresponde
-  if (session.lang === LANG_QU && res?.respuestaTexto) {
-    const outQu = await traducirTexto({ texto: res.respuestaTexto, targetLang: LANG_QU });
-    return { respuestaTexto: outQu, session: res.session || session };
-  }
-  return res;
+  // Forzar español por defecto
+  session.lang = 'es';
+  // Ejecutar lógica principal
+  return responderIA_ES(session, texto);
 }
 
 module.exports = { responderIA };

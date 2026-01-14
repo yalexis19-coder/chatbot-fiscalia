@@ -1261,6 +1261,9 @@ También puede escribir *Menú* para volver.`,
     if (!Number.isNaN(n) && n >= 1 && n <= session.menu.opciones.length) {
       const sel = session.menu.opciones[n - 1];
       session.menu = null;
+      // UX PATCH: marca que la ambigüedad ya fue resuelta por selección del usuario.
+      // Esto evita que el chequeo de ambigüedad vuelva a dispararse por el mismo texto.
+      session.contexto.distritoAmbigResuelto = true;
       session.contexto.distritoTexto = sel.distrito;
       session.estado = 'DERIVACION';
       resetFailGuard(session);
@@ -1280,12 +1283,17 @@ También puede escribir *Menú* para volver.`,
     // Si ya estamos esperando distrito, tomar la respuesta como distrito y continuar
     if (session.estado === 'ESPERANDO_DISTRITO') {
       session.contexto.distritoTexto = texto;
+      // UX PATCH: si el usuario vuelve a escribir un distrito manualmente,
+      // reiniciamos el flag de ambigüedad resuelta.
+      session.contexto.distritoAmbigResuelto = false;
     }
 
     // UX PATCH – si el distrito es ambiguo, pedir precisión (provincia)
     if (session.contexto.distritoTexto) {
-      const opciones = obtenerOpcionesDistritoAmbiguo(session.contexto.distritoTexto);
-      if (opciones.length > 1) {
+      // Si ya se resolvió la ambigüedad por selección, no volver a preguntar.
+      if (!session.contexto.distritoAmbigResuelto) {
+        const opciones = obtenerOpcionesDistritoAmbiguo(session.contexto.distritoTexto);
+        if (opciones.length > 1) {
         session.menu = { tipo: 'AMBIG_DISTRITO', opciones };
         session.estado = 'ESPERANDO_DISTRITO_AMBIG';
         const listado = opciones.map((o,i)=>`${i+1}) ${o.distrito} – Provincia: ${o.provincia}`).join('\n');
@@ -1293,6 +1301,7 @@ También puede escribir *Menú* para volver.`,
           respuestaTexto: `Encontré más de un distrito con ese nombre. Por favor elija una opción:\n${listado}\n\nResponda con el número.`,
           session
         };
+        }
       }
     }
 

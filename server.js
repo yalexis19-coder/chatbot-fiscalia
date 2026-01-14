@@ -28,6 +28,34 @@ function getSession(userId) {
 }
 
 // ---------------------------
+// Helpers – Quick Replies
+// ---------------------------
+// ✅ IMPORTANTE: Para no duplicar lógica ni textos en server.js,
+// los quick replies se traducen a un texto simple ("1".."5") y se
+// envían a responderIA(). Así, el menú/FAQ/ubicación siempre se manejan
+// por ia.js (una sola fuente de verdad).
+function mapQuickReplyToText(payload) {
+  switch (payload) {
+    case 'MENU_DENUNCIA': return '1';
+    case 'MENU_UBICACION': return '2';
+    case 'MENU_FAQ': return '3';
+    case 'MENU_CONTACTOS': return '4';
+    case 'MENU_OPERADOR': return '5';
+    default: return null;
+  }
+}
+
+function buildMainMenuQuickReplies() {
+  return [
+    { content_type: 'text', title: '📝 Denuncia', payload: 'MENU_DENUNCIA' },
+    { content_type: 'text', title: '📍 Ubicación', payload: 'MENU_UBICACION' },
+    { content_type: 'text', title: '❓ FAQ', payload: 'MENU_FAQ' },
+    { content_type: 'text', title: '☎️ Contactos', payload: 'MENU_CONTACTOS' },
+    { content_type: 'text', title: '💬 Operador (WhatsApp)', payload: 'MENU_OPERADOR' }
+  ];
+}
+
+// ---------------------------
 // Enviar mensaje a Messenger (con quick replies opcionales)
 // ---------------------------
 async function enviarMensajeMessenger(recipientId, text, quickReplies = null) {
@@ -94,18 +122,13 @@ app.post('/webhook', async (req, res) => {
         session.estado = 'INICIO';
         session.contexto = null;
 
-        const bienvenida =
-          'Hola 👋 Soy el asistente virtual del Ministerio Público (Cajamarca). ¿Qué deseas hacer?';
+        // ✅ Fuente única: el texto del menú y la lógica están en ia.js.
+        // Enviamos un saludo para que ia.js responda con el menú principal.
+        const { respuestaTexto, session: nuevaSession } = await responderIA(session, 'hola');
+        sessions[senderId] = nuevaSession;
 
-        const menu = [
-          { content_type: 'text', title: '📝 Denuncia', payload: 'MENU_DENUNCIA' },
-          { content_type: 'text', title: '📍 Ubicación de fiscalía', payload: 'MENU_UBICACION' },
-          { content_type: 'text', title: '❓ Preguntas frecuentes', payload: 'MENU_FAQ' },
-          { content_type: 'text', title: '📄 Trámites', payload: 'MENU_TRAMITES' },
-          { content_type: 'text', title: '☎️ Contactos', payload: 'MENU_CONTACTOS' }
-        ];
-
-        await enviarMensajeMessenger(senderId, bienvenida, menu);
+        // Quick replies opcionales (solo UI). La selección se procesa por ia.js.
+        await enviarMensajeMessenger(senderId, respuestaTexto, buildMainMenuQuickReplies());
         continue; // ✅ evita caer a otros bloques
       }
 
@@ -114,38 +137,26 @@ app.post('/webhook', async (req, res) => {
       // ---------------------------
       const qrPayload = event.message?.quick_reply?.payload;
       if (qrPayload) {
-        if (qrPayload === 'MENU_DENUNCIA') {
-          session.estado = 'ESPERANDO_RELATO';
-          session.contexto = null;
+        const mapped = mapQuickReplyToText(qrPayload);
+        if (!mapped) {
+          await enviarMensajeMessenger(senderId, 'Puede escribir su consulta o elegir una opción.');
+          continue;
+        }
 
+        try {
+          const { respuestaTexto, session: nuevaSession } = await responderIA(session, mapped);
+          sessions[senderId] = nuevaSession;
+
+          // Si el usuario vuelve al menú, mostramos quick replies.
+          const showQR = (nuevaSession?.estado === 'INICIO');
+          await enviarMensajeMessenger(senderId, respuestaTexto, showQR ? buildMainMenuQuickReplies() : null);
+        } catch (e) {
+          console.error('Error QR:', e);
           await enviarMensajeMessenger(
             senderId,
-            'Perfecto. Cuéntame, por favor, ¿qué ocurrió? Puedes describir los hechos con tus palabras.'
+            'Ocurrió un inconveniente al procesar su selección. Intente nuevamente o escriba *Menú*.'
           );
-          continue;
         }
-
-        if (qrPayload === 'MENU_UBICACION') {
-          await enviarMensajeMessenger(senderId, 'Dime qué fiscalía buscas o en qué distrito estás.');
-          continue;
-        }
-
-        if (qrPayload === 'MENU_FAQ') {
-          await enviarMensajeMessenger(senderId, '¿Qué consulta frecuente tienes? Escríbeme tu pregunta.');
-          continue;
-        }
-
-        if (qrPayload === 'MENU_TRAMITES') {
-          await enviarMensajeMessenger(senderId, '¿Qué trámite deseas consultar? (denuncia, copias, seguimiento, etc.)');
-          continue;
-        }
-
-        if (qrPayload === 'MENU_CONTACTOS') {
-          await enviarMensajeMessenger(senderId, '¿De qué fiscalía necesitas el contacto? Indícame el distrito o nombre.');
-          continue;
-        }
-
-        await enviarMensajeMessenger(senderId, 'Puede escribir su consulta o elegir una opción.');
         continue;
       }
 
@@ -158,8 +169,11 @@ app.post('/webhook', async (req, res) => {
             await responderIA(session, event.message.text);
 
           sessions[senderId] = nuevaSession;
-          await enviarMensajeMessenger(senderId, respuestaTexto);
+          // Si la respuesta vuelve al menú, mostramos quick replies (solo UI).
+          const showQR = (nuevaSession?.estado === 'INICIO');
+          await enviarMensajeMessenger(senderId, respuestaTexto, showQR ? buildMainMenuQuickReplies() : null);
         } catch (e) {
+          console.error('Error texto:', e);
           await enviarMensajeMessenger(
             senderId,
             'Ocurrió un inconveniente al procesar su mensaje. Intente nuevamente.'

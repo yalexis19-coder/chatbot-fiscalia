@@ -83,6 +83,59 @@ function normalize(str) {
     .trim();
 }
 
+// ---------------------------
+// UX PATCH – Validaciones suaves (no alteran lógica de fondo)
+// ---------------------------
+
+// Normaliza clave de distrito para matching más tolerante:
+// - quita artículos iniciales (el/la/los/las)
+// - quita contenido entre paréntesis (p.ej. "Bolívar (San Miguel)")
+function normalizeDistritoKey(str) {
+  let s = normalize(str);
+  if (!s) return '';
+  s = s.replace(/\([^)]*\)/g, '').trim();           // sin paréntesis
+  s = s.replace(/^(el|la|los|las)\s+/g, '').trim(); // sin artículo inicial
+  s = s.replace(/\s+/g, ' ').trim();
+  return s;
+}
+
+// Detecta entradas "vacías útiles" (solo emojis/símbolos/puntuación)
+function isOnlySymbolsOrEmojis(input = '') {
+  const s = String(input || '').trim();
+  if (!s) return true;
+  // si quitamos letras/números y queda igual => solo símbolos/emojis
+  const removedLettersNumbers = s.replace(/[a-zA-Z0-9\u00C0-\u017F]/g, '');
+  const a = removedLettersNumbers.replace(/\s+/g, '');
+  const b = s.replace(/\s+/g, '');
+  return a.length === b.length;
+}
+
+// Inferencia UX de vínculo (solo para evitar repreguntar lo obvio en el relato)
+function inferirVinculoSiDesdeRelato(relato = '') {
+  const t = normalize(relato);
+  if (!t) return null;
+
+  // Familia directa / cercana
+  if (/\bmi\s+(hermano|hermana|papa|padre|mama|madre|hijo|hija|abuelo|abuela|tio|tia|primo|prima|sobrino|sobrina)\b/.test(t)) return 'SI';
+
+  // Pareja / expareja
+  if (/\bmi\s+(pareja|esposo|esposa|conviviente)\b/.test(t)) return 'SI';
+  if (/\b(expareja|ex\s+pareja|exesposo|ex\s+esposo|exesposa|ex\s+esposa)\b/.test(t)) return 'SI';
+
+  return null;
+}
+
+// Detecta ambigüedad de distrito por coincidencia de nombre (sin paréntesis) en diferentes provincias
+function obtenerOpcionesDistritoAmbiguo(distritoInput) {
+  const q = normalizeDistritoKey(distritoInput);
+  if (!q) return [];
+  const rows = (knowledge?.distritos || []);
+  const opciones = rows
+    .filter(d => normalizeDistritoKey(d.distrito) === q)
+    .map(d => ({ provincia: d.provincia, distrito: d.distrito }));
+  return opciones.length > 1 ? opciones : [];
+}
+
 function levenshtein(a, b) {
   a = normalize(a);
   b = normalize(b);
@@ -636,6 +689,17 @@ async function responderIA_ES(session, texto) {
   if (!session.estado) session.estado = 'INICIO';
   if (typeof session.finalTurns !== 'number') session.finalTurns = 0;
 
+  // UX PATCH – si el mensaje es solo emojis/símbolos, pedir texto válido sin romper el flujo
+  if (isOnlySymbolsOrEmojis(texto)) {
+    const c = invalidAttempt(session, session.estado || 'INICIO');
+    if (c >= 3) {
+      initMenu(session);
+      return { respuestaTexto: 'Entiendo. Para continuar, por favor escriba un texto (por ejemplo: el distrito, un número de opción, o describa el caso).\n\n' + menuPrincipalTexto(), session };
+    }
+    return { respuestaTexto: `Para poder ayudarle, por favor escriba un texto válido (no solo emojis o símbolos). Intentos: ${c}/3.\n\nPuede escribir *Menú* para volver.`, session };
+  }
+
+
   // ---------------------------
   // Saludo / Inicio
   // ---------------------------
@@ -855,27 +919,15 @@ También puede escribir *Menú* para volver.`,
       };
     }
 
-    // búsqueda por palabra clave
-    const hits = faqs
-      .map((x, idx) => ({ idx, p: x.pregunta || '', r: x.respuesta || '' }))
-      .filter(x => normalize(x.p).includes(t) || normalize(x.r).includes(t))
-      .slice(0, 5);
-
-    if (hits.length) {
-      const listado = hits.map((h, i) => `${i + 1}) ${faqs[h.idx].pregunta}`).join('\n');
-      session.menu = { tipo: 'FAQ_HITS', hits };
-      return {
-        respuestaTexto:
-          `Encontré estas preguntas relacionadas. Responda con el número:\n${listado}\n\n` +
-          'O escriba otra palabra clave, o *Menú* para volver.',
-        session
-      };
-    }
-
+    // UX PATCH – SOLO permitir selección por número
+    const c = invalidAttempt(session, 'MENU_FAQ');
+    if (c >= 3) { initMenu(session); return { respuestaTexto: menuPrincipalTexto(), session }; }
     return {
       respuestaTexto:
-        'Escriba el *número* de la pregunta o una *palabra clave* (ej.: “pruebas”, “gratuita”, “turno”).\n\n' +
-        'Escriba *Menú* para volver.',
+        `Por favor responda *solo con el número* de la pregunta (1–${faqs.length}).
+
+` +
+        `Intentos: ${c}/3. (Puede escribir *Menú* para volver).`,
       session
     };
   }
@@ -964,34 +1016,8 @@ También puede escribir *Menú* para volver.`,
     };
   }
 
-  // Resolver selección dentro de listas (FAQ_HITS / UBICACION_LISTA)
-  if (session.menu?.tipo === 'FAQ_HITS' && session.estado === 'MENU_FAQ') {
-    const t = normalize(texto);
-    const n = parseInt(t, 10);
-    if (!Number.isNaN(n) && n >= 1 && n <= session.menu.hits.length) {
-      const faqs = knowledge?.faq || [];
-      const idx = session.menu.hits[n - 1].idx;
-      const item = faqs[idx];
-      resetFailGuard(session);
-      return {
-        respuestaTexto:
-          `❓ *${item.pregunta}*\n\n${item.respuesta}\n\n` +
-          'Escriba otro número/palabra clave, o *Menú* para volver.',
-        session
-      };
-    }
 
-    // Si estaba eligiendo de una lista y respondió algo inválido, evitar bucle:
-    const esNumero = /^\d+$/.test(t);
-    if (esNumero) {
-      const c = invalidAttempt(session, 'FAQ_HITS');
-      if (c >= 3) return cancelarPorBucle(session);
-      return {
-        respuestaTexto: `Responda con un número válido (1–${session.menu.hits.length}). Intentos: ${c}/3. (Puede escribir *Cancelar*)`,
-        session
-      };
-    }
-  }
+  // Resolver selección dentro de listas (solo UBICACION_LISTA)
 
   if (session.menu?.tipo === 'UBICACION_LISTA' && session.estado === 'MENU_UBICACION') {
     const t = normalize(texto);
@@ -1034,7 +1060,7 @@ También puede escribir *Menú* para volver.`,
     // Si en cierre piden operador/faq/contacto/ubicación, permitirlo como atajo
     const opt = detectarOpcionMenuPrincipal(texto);
     if (opt === 'UBICACION') { session.estado = 'MENU_UBICACION'; session.menu = null; return { respuestaTexto: 'Indique el *distrito* o el *nombre/código* de la fiscalía que desea ubicar.', session }; }
-    if (opt === 'FAQ') { session.estado = 'MENU_FAQ'; session.menu = null; const faqs = knowledge?.faq || []; const listado = (faqs || []).slice(0, 10).map((x,i)=>`${i+1}) ${x.pregunta}`).join('\n'); return { respuestaTexto: `📚 *FAQ*\n${listado}\n\nResponda con el número o una palabra clave.`, session }; }
+    if (opt === 'FAQ') { session.estado = 'MENU_FAQ'; session.menu = null; const faqs = knowledge?.faq || []; const listado = (faqs || []).slice(0, 10).map((x,i)=>`${i+1}) ${x.pregunta}`).join('\n'); return { respuestaTexto: `📚 *FAQ*\n${listado}\n\nResponda *solo con el número* (1–10).`, session }; }
     if (opt === 'CONTACTO') { session.estado = 'MENU_CONTACTO'; session.menu = { tipo:'CONTACTO', page:0 }; return responderIA_ES(session, ''); }
     if (opt === 'OPERADOR') { session.estado = 'MENU_OPERADOR'; return responderIA_ES(session, texto); }
 
@@ -1093,7 +1119,7 @@ También puede escribir *Menú* para volver.`,
         const listado = faqs.slice(0, 10).map((x, i) => `${i + 1}) ${x.pregunta}`).join('\n');
         return {
           respuestaTexto:
-            `📚 *FAQ*\n${listado}\n\nResponda con el número o una palabra clave.`,
+            `📚 *FAQ*\n${listado}\n\nResponda *solo con el número* (1–10).`,
           session
         };
       }
@@ -1142,6 +1168,13 @@ También puede escribir *Menú* para volver.`,
   // ---------------------------
   if (session.estado === 'ESPERANDO_RELATO') {
     const tRel = normalize(texto);
+
+
+    // UX PATCH – si el relato ya menciona pareja/hermano/etc., evitar repreguntar vínculo
+    if (!session.contexto.vinculoRespuesta) {
+      const v = inferirVinculoSiDesdeRelato(texto);
+      if (v === 'SI') session.contexto.vinculoRespuesta = 'SI';
+    }
 
     // ✅ Caso penal con agresor NO familiar (ej. vecino/desconocido):
     // Primero pedir el distrito (NO intentar derivar sin distrito).
@@ -1221,6 +1254,23 @@ También puede escribir *Menú* para volver.`,
   // ---------------------------
   // Derivación / distrito (lógica existente – NO se cambia)
   // ---------------------------
+  // UX PATCH – Resolución de distrito ambiguo (p.ej. “Bolívar” en distintas provincias)
+  if (session.estado === 'ESPERANDO_DISTRITO_AMBIG' && session.menu?.tipo === 'AMBIG_DISTRITO' && Array.isArray(session.menu.opciones)) {
+    const t = normalize(texto);
+    const n = parseInt(t, 10);
+    if (!Number.isNaN(n) && n >= 1 && n <= session.menu.opciones.length) {
+      const sel = session.menu.opciones[n - 1];
+      session.menu = null;
+      session.contexto.distritoTexto = sel.distrito;
+      session.estado = 'DERIVACION';
+      resetFailGuard(session);
+      return responderIA_ES(session, session.contexto.distritoTexto);
+    }
+    const c = invalidAttempt(session, 'ESPERANDO_DISTRITO_AMBIG');
+    if (c >= 3) return cancelarPorBucle(session);
+    return { respuestaTexto: `Por favor responda con el número de la opción (1–${session.menu.opciones.length}). Intentos: ${c}/3. (Puede escribir *Cancelar*)`, session };
+  }
+
   if (session.estado === 'DERIVACION' || session.estado === 'ESPERANDO_DISTRITO') {
     if (!session.contexto.materiaDetectada) {
       session.estado = 'INICIO';
@@ -1230,6 +1280,20 @@ También puede escribir *Menú* para volver.`,
     // Si ya estamos esperando distrito, tomar la respuesta como distrito y continuar
     if (session.estado === 'ESPERANDO_DISTRITO') {
       session.contexto.distritoTexto = texto;
+    }
+
+    // UX PATCH – si el distrito es ambiguo, pedir precisión (provincia)
+    if (session.contexto.distritoTexto) {
+      const opciones = obtenerOpcionesDistritoAmbiguo(session.contexto.distritoTexto);
+      if (opciones.length > 1) {
+        session.menu = { tipo: 'AMBIG_DISTRITO', opciones };
+        session.estado = 'ESPERANDO_DISTRITO_AMBIG';
+        const listado = opciones.map((o,i)=>`${i+1}) ${o.distrito} – Provincia: ${o.provincia}`).join('\n');
+        return {
+          respuestaTexto: `Encontré más de un distrito con ese nombre. Por favor elija una opción:\n${listado}\n\nResponda con el número.`,
+          session
+        };
+      }
     }
 
     // ✅ Si aún no tenemos distrito, primero preguntarlo (no usar el mismo relato como distrito)
@@ -1260,10 +1324,13 @@ También puede escribir *Menú* para volver.`,
       return { respuestaTexto: res.mensaje, session };
     }
 
-    session.estado = 'ESPERANDO_RELATO';
+    // UX PATCH – mantener materia/contexto y volver a pedir distrito (evita que pida materia por error)
+    session.estado = 'ESPERANDO_DISTRITO';
     return {
       respuestaTexto:
-        'No pude determinar la fiscalía competente con esa información. ¿Podría describir nuevamente el caso e indicar el distrito si lo conoce?',
+        'No pude determinar la fiscalía competente con esa información.\n\n' +
+        'Por favor indique nuevamente el *distrito* donde ocurrieron los hechos (ej.: “Cajamarca”, “Los Baños del Inca”, “Jesús”).\n\n' +
+        'También puede escribir *Menú* para volver.',
       session
     };
   }

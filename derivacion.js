@@ -38,6 +38,15 @@ function normalizarRequiereVinculo(v) {
   return null;
 }
 
+function normalizeDistritoKey(str) {
+  let s = normalize(str);
+  if (!s) return '';
+  s = s.replace(/\([^)]*\)/g, '').trim();          // sin paréntesis
+  s = s.replace(/^(el|la|los|las)\s+/g, '').trim(); // sin artículo inicial
+  s = s.replace(/\s+/g, ' ').trim();
+  return s;
+}
+
 // ---------------------------
 // Fuzzy matching (typos leves)
 // ---------------------------
@@ -93,17 +102,17 @@ function resolverAliasDistrito(aliasDistritos, texto) {
 }
 
 function findDistritoRecord(distritos, distritoTexto) {
-  const d = normalize(distritoTexto);
+  const d = normalizeDistritoKey(distritoTexto);
   if (!d) return null;
 
-  const exact = (distritos || []).find(x => normalize(x.distrito) === d);
+  const exact = (distritos || []).find(x => normalizeDistritoKey(x.distrito) === d);
   if (exact) return exact;
 
-  const cand = (distritos || []).map(x => normalize(x.distrito)).filter(Boolean);
+  const cand = (distritos || []).map(x => normalizeDistritoKey(x.distrito)).filter(Boolean);
   const hit = bestFuzzyMatch(cand, d, 2);
   if (!hit) return null;
 
-  return (distritos || []).find(x => normalize(x.distrito) === hit) || null;
+  return (distritos || []).find(x => normalizeDistritoKey(x.distrito) === hit) || null;
 }
 
 function tieneFiscaliaViolencia(distritoRec) {
@@ -122,11 +131,11 @@ function findFiscaliaByCodigo(fiscalias, codigo) {
 
 function findReglaDistrito(reglas, materia, distrito) {
   const m = normalize(materia);
-  const d = normalize(distrito);
+  const d = normalizeDistritoKey(distrito);
   return (reglas || []).find(r =>
     normalize(r.materia) === m &&
     esAlcanceDistrito(r.alcance) &&
-    normalize(r.distrito) === d
+    normalizeDistritoKey(r.distrito) === d
   ) || null;
 }
 

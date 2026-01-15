@@ -102,6 +102,15 @@ function resolverAliasDistrito(aliasDistritos, texto) {
 }
 
 function findDistritoRecord(distritos, distritoTexto) {
+  // 1) Intento exacto por nombre COMPLETO (incluye paréntesis).
+  //    Esto permite desambiguar casos como "Bolívar (Bolívar)" vs "Bolívar (San Miguel)"
+  //    cuando el usuario ya eligió una opción específica.
+  const full = normalize(distritoTexto);
+  if (!full) return null;
+  const exactFull = (distritos || []).find(x => normalize(x.distrito) === full);
+  if (exactFull) return exactFull;
+
+  // 2) Fallback: matching tolerante sin paréntesis (comportamiento previo)
   const d = normalizeDistritoKey(distritoTexto);
   if (!d) return null;
 

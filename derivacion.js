@@ -140,6 +140,17 @@ function findFiscaliaByCodigo(fiscalias, codigo) {
 
 function findReglaDistrito(reglas, materia, distrito) {
   const m = normalize(materia);
+  const full = normalize(distrito);
+
+  // 1) Intento exacto por nombre COMPLETO de distrito (incluye paréntesis si existieran en knowledge.json)
+  const exactFull = (reglas || []).find(r =>
+    normalize(r.materia) === m &&
+    esAlcanceDistrito(r.alcance) &&
+    normalize(r.distrito) === full
+  ) || null;
+  if (exactFull) return exactFull;
+
+  // 2) Fallback: matching tolerante ignorando paréntesis (comportamiento previo)
   const d = normalizeDistritoKey(distrito);
   return (reglas || []).find(r =>
     normalize(r.materia) === m &&
